@@ -751,7 +751,7 @@
       {
         "key": "CurveSpeedController",
         "label": "Curve Speed Controller",
-        "description": "Automatically slow down for upcoming curves using data learned from your driving style, adapting to curves as you would.",
+        "description": "Automatically slow down for upcoming curves using data learned from your driving style, adapting to curves as you would. Press RES+ while it is slowing to cancel the slowdown for that curve.",
         "data_type": "bool",
         "ui_type": "toggle",
         "is_parent_toggle": true,
@@ -778,7 +778,7 @@
       {
         "key": "ResetCurveData",
         "label": "Reset Curve Data",
-        "description": "Clear learned Curve Speed Controller data and begin training again from the default lateral acceleration.",
+        "description": "Clear learned Curve Speed Controller data and begin training again from the built-in comfort defaults.",
         "ui_type": "action",
         "action_label": "Reset",
         "action_endpoint": "/api/curve_speed_controller/reset",
