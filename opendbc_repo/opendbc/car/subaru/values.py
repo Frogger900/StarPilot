@@ -12,14 +12,6 @@ Ecu = CarParams.Ecu
 
 class CarControllerParams:
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
-    650,
-    ([], []),
-    ([], []),
-    MAX_LATERAL_ACCEL=ISO_LATERAL_ACCEL + (ACCELERATION_DUE_TO_GRAVITY * 0.06),
-    MAX_LATERAL_JERK=3.0 + (ACCELERATION_DUE_TO_GRAVITY * 0.06),
-    MAX_ANGLE_RATE=1,
-  )
-  LEGACY_2025_ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
     545,
     ([0., 5., 35.], [5., .8, .15]),
     ([0., 5., 35.], [5., .8, .15]),
@@ -77,11 +69,7 @@ class SubaruSafetyFlags(IntFlag):
   GEN2 = 1
   LONG = 2
   PREGLOBAL_REVERSED_DRIVER_TORQUE = 4
-  STOP_AND_GO = 8
-  LKAS_ANGLE = 16
-  D_PLATFORM = 32
-  D_PLATFORM_CAMERA = 64
-  LEGACY_2025_ANGLE_LIMITS = 128
+  LKAS_ANGLE = 8
 
 
 class SubaruFlags(IntFlag):
@@ -98,8 +86,6 @@ class SubaruFlags(IntFlag):
   PREGLOBAL = 16
   HYBRID = 32
   LKAS_ANGLE = 64
-  D_PLATFORM = 128
-  D_PLATFORM_CAMERA = 256
 
 
 GLOBAL_ES_ADDR = 0x787
@@ -110,18 +96,6 @@ class CanBus:
   main = 0
   alt = 1
   camera = 2
-
-  @staticmethod
-  def main_for_cp(CP):
-    return CanBus.alt if CP.flags & SubaruFlags.D_PLATFORM else CanBus.main
-
-  @staticmethod
-  def alt_for_cp(CP):
-    return CanBus.alt
-
-  @staticmethod
-  def angle_for_cp(CP):
-    return CanBus.camera if CP.flags & SubaruFlags.D_PLATFORM_CAMERA else CanBus.main
 
 
 class Footnote(Enum):
@@ -241,23 +215,28 @@ class CAR(Platforms):
     flags=SubaruFlags.LKAS_ANGLE,
   )
   SUBARU_OUTBACK_2023 = SubaruGen2PlatformConfig(
-    [SubaruCarDocs("Subaru Outback 2023-24", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
-    SUBARU_OUTBACK.specs,
-    flags=SubaruFlags.LKAS_ANGLE | SubaruFlags.D_PLATFORM,
-  )
-  SUBARU_LEGACY_2025 = SubaruGen2PlatformConfig(
-    [SubaruCarDocs("Subaru Legacy 2025", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
+    [SubaruCarDocs("Subaru Outback 2023-25", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
     SUBARU_OUTBACK.specs,
     flags=SubaruFlags.LKAS_ANGLE,
   )
   SUBARU_ASCENT_2023 = SubaruGen2PlatformConfig(
-    [SubaruCarDocs("Subaru Ascent 2023-25", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
+    [SubaruCarDocs("Subaru Ascent 2023", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
     SUBARU_ASCENT.specs,
-    flags=SubaruFlags.LKAS_ANGLE | SubaruFlags.D_PLATFORM | SubaruFlags.D_PLATFORM_CAMERA,
+    flags=SubaruFlags.LKAS_ANGLE,
+  )
+  SUBARU_CROSSTREK_2024 = SubaruGen2PlatformConfig(
+    [SubaruCarDocs("Subaru Crosstrek 2024", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
+    CarSpecs(mass=1529, wheelbase=2.5781, steerRatio=13),
+    flags=SubaruFlags.LKAS_ANGLE,
   )
   SUBARU_CROSSTREK_2025 = SubaruGen2PlatformConfig(
     [SubaruCarDocs("Subaru Crosstrek 2025", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
     CarSpecs(mass=1529, wheelbase=2.67, steerRatio=17),
+    flags=SubaruFlags.LKAS_ANGLE,
+  )
+  SUBARU_LEGACY_2025 = SubaruGen2PlatformConfig(
+    [SubaruCarDocs("Subaru Legacy 2025", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
+    SUBARU_OUTBACK.specs,
     flags=SubaruFlags.LKAS_ANGLE,
   )
 

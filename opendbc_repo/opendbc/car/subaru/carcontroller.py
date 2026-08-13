@@ -1,11 +1,10 @@
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, apply_steer_angle_limits_vm, common_fault_avoidance
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import CAR, DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
-from opendbc.car.vehicle_model import VehicleModel
 
 # FIXME: These limits aren't exact. The real limit is more than likely over a larger time period and
 # involves the total steering angle change rather than rate, but these limits work well for now
@@ -14,13 +13,6 @@ MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 
 _SNG_ACC_MIN_DIST = 3
 _SNG_ACC_MAX_DIST = 4.5
-_LEGACY_2025_MADS_MIN_SPEED = 0.44704
-_LEGACY_2025_MADS_MAX_STEER_ANGLE = 120.0
-
-
-def get_safety_CP():
-  from opendbc.car.subaru.interface import CarInterface
-  return CarInterface.get_non_essential_params("SUBARU_ASCENT")
 
 
 class CarController(CarControllerBase):
@@ -28,63 +20,29 @@ class CarController(CarControllerBase):
     super().__init__(dbc_names, CP)
     self.apply_torque_last = 0
     self.apply_steer_last = 0
-    self.driver_override = False
-    self.legacy_2025_lkas_active = False
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
-    self.main_bus = CanBus.main_for_cp(CP)
-    self.angle_bus = CanBus.angle_for_cp(CP)
-    self.status_bus = CanBus.camera if CP.flags & SubaruFlags.D_PLATFORM_CAMERA else CanBus.main
-
-    if CP.flags & SubaruFlags.LKAS_ANGLE:
-      self.VM = VehicleModel(get_safety_CP())
+    self.main_bus = CanBus.main
+    self.angle_bus = CanBus.alt if CP.flags & SubaruFlags.GLOBAL_GEN2 else CanBus.main
+    self.status_bus = CanBus.main
 
     self.prev_close_distance = 0
     self.epb_resume_frames_remaining = -1
     self.last_standstill_frame = 0
 
   def lateral_angle(self, CC, CS):
-    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
-      mads_only = CC.latActive and not CC.enabled
-      mads_only_ok = CS.out.vEgoRaw > _LEGACY_2025_MADS_MIN_SPEED and \
-        abs(CS.out.steeringAngleDeg) < _LEGACY_2025_MADS_MAX_STEER_ANGLE
-      lkas_active = CC.latActive and (not mads_only or mads_only_ok) and \
-        CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
-
-      if lkas_active and not self.legacy_2025_lkas_active:
-        self.apply_steer_last = CS.out.steeringAngleDeg
-
-      apply_steer = apply_std_steer_angle_limits(
-        CC.actuators.steeringAngleDeg,
-        self.apply_steer_last,
-        CS.out.vEgoRaw,
-        CS.out.steeringAngleDeg,
-        lkas_active,
-        self.p.LEGACY_2025_ANGLE_LIMITS,
-      )
-      self.apply_steer_last = apply_steer
-      self.legacy_2025_lkas_active = lkas_active
-      return subarucan.create_steering_control_angle(self.packer, apply_steer, lkas_active, self.angle_bus)
-
-    abs_torque = abs(CS.out.steeringTorque)
-    if abs_torque > self.p.STEER_OVERRIDE_TORQUE_HIGH:
-      self.driver_override = True
-    elif abs_torque < self.p.STEER_OVERRIDE_TORQUE_LOW:
-      self.driver_override = False
-
-    lat_active = CC.latActive and not self.driver_override
-    apply_steer = apply_steer_angle_limits_vm(
+    lat_active = CC.latActive
+    apply_steer = apply_std_steer_angle_limits(
       CC.actuators.steeringAngleDeg,
       self.apply_steer_last,
       CS.out.vEgoRaw,
       CS.out.steeringAngleDeg,
       lat_active,
-      self.p,
-      self.VM,
+      self.p.ANGLE_LIMITS,
     )
 
     if not lat_active:
@@ -213,7 +171,7 @@ class CarController(CarControllerBase):
       else:
         if pcm_cancel_cmd:
           if not (self.CP.flags & SubaruFlags.HYBRID):
-            bus = CanBus.alt_for_cp(self.CP) if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else self.main_bus
+            bus = CanBus.alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else self.main_bus
             can_sends.append(subarucan.create_es_distance(self.packer, CS.es_distance_msg["COUNTER"] + 1, CS.es_distance_msg, bus, pcm_cancel_cmd))
 
       if self.CP.flags & SubaruFlags.DISABLE_EYESIGHT:
