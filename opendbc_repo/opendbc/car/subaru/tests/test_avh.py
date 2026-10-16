@@ -44,22 +44,32 @@ def test_captured_legacy_press_bytes():
   template = bytes.fromhex('5b0b000100800e00')
   assert avh_request(template, 1) == (0x6BB, bytes.fromhex('5e0c020100800e00'), 1)
   assert avh_request(template, 2) == (0x6BB, bytes.fromhex('5f0d020100800e00'), 1)
+  assert avh_request(template, 3) == (0x6BB, bytes.fromhex('600e020100800e00'), 1)
+  assert avh_request(template, 4) == (0x6BB, bytes.fromhex('610f020100800e00'), 1)
   wrap = sample(AVH_REQUEST, 15)
   assert avh_request(wrap, 1)[1][1] == 0
   assert avh_request(wrap, 2)[1][1] == 1
+  assert avh_request(wrap, 3)[1][1] == 2
+  assert avh_request(wrap, 4)[1][1] == 3
 
 
-def test_two_frames_only_and_no_retry():
+def test_four_frames_only_and_no_retry():
   policy, frames = prepare()
   assert policy.update(110.04, frames, True, True, False) == []
   assert policy.update(110.06, frames, True, True, False) == [avh_request(frames[AVH_REQUEST][1], 2)]
-  assert policy.update(110.07, frames, True, True, False) == []
+  assert policy.update(110.08, frames, True, True, False) == []
+  assert policy.update(110.12, frames, True, True, False) == [avh_request(frames[AVH_REQUEST][1], 3)]
+  assert policy.update(110.14, frames, True, True, False) == []
+  assert policy.update(110.18, frames, True, True, False) == [avh_request(frames[AVH_REQUEST][1], 4)]
+  assert policy.update(110.20, frames, True, True, False) == []
   assert policy.update(111, frames, True, True, False) == []
 
 
 def test_controller_snapshots_may_skip_fast_can_samples():
   policy, frames = prepare(fast_counter_step=2)
   assert policy.update(110.06, frames, True, True, False) == [avh_request(frames[AVH_REQUEST][1], 2)]
+  assert policy.update(110.12, frames, True, True, False) == [avh_request(frames[AVH_REQUEST][1], 3)]
+  assert policy.update(110.18, frames, True, True, False) == [avh_request(frames[AVH_REQUEST][1], 4)]
 
 
 @pytest.mark.parametrize('reason', ['late', 'new_template', 'manual', 'ack', 'moving', 'gas', 'gear', 'invalid', 'disabled', 'engaged', 'stale'])
