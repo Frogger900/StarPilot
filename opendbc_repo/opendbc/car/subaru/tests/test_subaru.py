@@ -1030,3 +1030,48 @@ def test_other_angle_cars_keep_lateral_status_behavior():
   controller.angle_lkas_active = False
 
   assert controller._lkas_status_active(SimpleNamespace(latActive=True))
+
+
+def test_angle_filter_speed_schedule():
+  for speed, tau in ((0.0, 0.3), (5.0, 0.3), (7.5, 0.2), (10.0, 0.1), (15.0, 0.05), (20.0, 0.0), (25.0, 0.0)):
+    CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+    controller = CarController({}, CP)
+    CC = structs.CarControl(latActive=True)
+    CC.actuators.steeringAngleDeg = 0.1
+    CS = SimpleNamespace(out=structs.CarState(vEgo=speed, vEgoRaw=speed, gearShifter="drive"))
+    actuators, _ = controller.update(CC.as_reader(), CS, 0)
+    expected_alpha = 0.01 / (tau + 0.01)
+    assert controller.angle_filter.x == pytest.approx(0.1 * expected_alpha)
+
+
+def test_angle_filter_updates_between_steering_messages():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+  controller = CarController({}, CP)
+  CC = structs.CarControl(latActive=True)
+  CC.actuators.steeringAngleDeg = 1.0
+  CS = SimpleNamespace(out=structs.CarState(vEgo=3.0, vEgoRaw=3.0, gearShifter="drive"))
+  values = []
+  for frame in range(3):
+    actuators, _ = controller.update(CC.as_reader(), CS, frame * 10_000_000)
+    values.append(actuators.steeringAngleDeg)
+
+  assert values[0] == values[1]
+  assert values[2] == pytest.approx(1.0 - (0.3 / 0.31) ** 3, abs=0.01)
+
+
+def test_angle_filter_resets_while_inactive():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+  controller = CarController({}, CP)
+  CC = structs.CarControl(latActive=True)
+  CC.actuators.steeringAngleDeg = 1.0
+  CS = SimpleNamespace(out=structs.CarState(vEgo=3.0, vEgoRaw=3.0, gearShifter="drive"))
+  controller.update(CC.as_reader(), CS, 0)
+  CC.latActive = False
+  CC.actuators.steeringAngleDeg = -1.0
+  controller.update(CC.as_reader(), CS, 10_000_000)
+  assert controller.angle_filter.x == -1.0
+  CC.latActive = True
+  CC.actuators.steeringAngleDeg = 0.0
+  controller.update(CC.as_reader(), CS, 20_000_000)
+  assert controller.angle_filter.x == pytest.approx(-0.3 / 0.31)
+

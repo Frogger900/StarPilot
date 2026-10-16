@@ -1,6 +1,7 @@
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
+from opendbc.car.common.filter_simple import FirstOrderFilter
 from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
@@ -62,6 +63,9 @@ class CarController(CarControllerBase):
 
     if CP.flags & SubaruFlags.LKAS_ANGLE and CP.carFingerprint != CAR.SUBARU_OUTBACK_2023:
       self.VM = VehicleModel(get_safety_CP())
+
+    if CP.flags & SubaruFlags.LKAS_ANGLE:
+      self.angle_filter = FirstOrderFilter(0.0, 0.3, DT_CTRL)
 
     self.prev_close_distance = 0
     self.epb_resume_frames_remaining = -1
@@ -183,7 +187,10 @@ class CarController(CarControllerBase):
     self.ascent_aol_arm_frames = min(self.ascent_aol_arm_frames + 1, _ASCENT_AOL_ARM_FRAMES)
     return self.ascent_aol_arm_frames >= _ASCENT_AOL_ARM_FRAMES
 
-  def lateral_angle(self, CC, CS):
+  def lateral_angle(self, CC, CS, apply_angle=None):
+    if apply_angle is None:
+      apply_angle = CC.actuators.steeringAngleDeg
+
     if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
       mads_only = CC.latActive and not CC.enabled
       mads_only_ok = CS.out.vEgoRaw > _LEGACY_2025_MADS_MIN_SPEED and \
@@ -194,8 +201,13 @@ class CarController(CarControllerBase):
       manual_handoff = self._angle_manual_handoff(CS, lkas_available)
       lkas_active = lkas_available and not manual_handoff
 
+      if lkas_active and not self.angle_lkas_active:
+        self.apply_steer_last = CS.out.steeringAngleDeg
+        if hasattr(self, "angle_filter"):
+          self.angle_filter.x = CS.out.steeringAngleDeg
+
       apply_steer = apply_std_steer_angle_limits(
-        CC.actuators.steeringAngleDeg,
+        apply_angle,
         self.apply_steer_last,
         CS.out.vEgoRaw,
         CS.out.steeringAngleDeg,
@@ -232,9 +244,11 @@ class CarController(CarControllerBase):
 
       if lkas_active and not self.angle_lkas_active and self.CP.carFingerprint != CAR.SUBARU_ASCENT_2023:
         self.apply_steer_last = CS.out.steeringAngleDeg
+        if hasattr(self, "angle_filter"):
+          self.angle_filter.x = CS.out.steeringAngleDeg
 
       apply_steer = apply_std_steer_angle_limits(
-        CC.actuators.steeringAngleDeg,
+        apply_angle,
         self.apply_steer_last,
         CS.out.vEgoRaw,
         CS.out.steeringAngleDeg,
@@ -255,8 +269,10 @@ class CarController(CarControllerBase):
     lat_active = lkas_available and not self.driver_override and not manual_handoff
     if lat_active and not self.angle_lkas_active:
       self.apply_steer_last = CS.out.steeringAngleDeg
+      if hasattr(self, "angle_filter"):
+        self.angle_filter.x = CS.out.steeringAngleDeg
     apply_steer = apply_steer_angle_limits_vm(
-      CC.actuators.steeringAngleDeg,
+      apply_angle,
       self.apply_steer_last,
       CS.out.vEgoRaw,
       CS.out.steeringAngleDeg,
@@ -312,7 +328,7 @@ class CarController(CarControllerBase):
     self.ascent_lkas_alert_counter_last = dat[1] & 0xf
     return msg
 
-  def update(self, CC, CS, now_nanos, starpilot_toggles):
+  def update(self, CC, CS, now_nanos, starpilot_toggles=None):
     actuators = CC.actuators
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
@@ -335,15 +351,24 @@ class CarController(CarControllerBase):
       ))
 
     # *** steering ***
+    if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      # Filter at the control-loop rate, including frames without a steering CAN message.
+      v_ego = getattr(getattr(CS, "out", None), "vEgo", 0.0)
+      if CC.latActive:
+        self.angle_filter.update_alpha(float(np.interp(v_ego, [5.0, 10.0, 20.0], [0.3, 0.1, 0.0])))
+        self.angle_filter.update(actuators.steeringAngleDeg)
+      else:
+        self.angle_filter.x = actuators.steeringAngleDeg
+
     if (self.frame % self.p.STEER_STEP) == 0:
       if self.CP.flags & SubaruFlags.LKAS_ANGLE:
-        can_sends.append(self.lateral_angle(CC, CS))
+        can_sends.append(self.lateral_angle(CC, CS, apply_angle=self.angle_filter.x))
       else:
         can_sends.append(self.lateral_torque(CC, CS))
 
     # *** stop and go ***
     subaru_sng_manual_parking_brake = getattr(starpilot_toggles, "subaru_sng_manual_parking_brake", False)
-    if starpilot_toggles.subaru_sng:
+    if getattr(starpilot_toggles, "subaru_sng", False):
       throttle_cmd, speed_cmd = self.stop_and_go(CC, CS, subaru_sng_manual_parking_brake)
 
     # *** longitudinal ***
