@@ -32,12 +32,12 @@ def request(step=1):
   return avh_request(sample(AVH_REQUEST, 10), step)[1]
 
 
-def test_pair_and_third_frame_blocked(safety):
-  assert safety.safety_tx_hook(packet(AVH_REQUEST, request()))
-  safety.set_timer(10_050_000)
-  assert safety.safety_tx_hook(packet(AVH_REQUEST, request(2)))
-  safety.set_timer(10_100_000)
-  assert not safety.safety_tx_hook(packet(AVH_REQUEST, request(2)))
+def test_burst_and_fifth_frame_blocked(safety):
+  for step in range(1, 5):
+    safety.set_timer(10_000_000 + (step - 1) * 50_000)
+    assert safety.safety_tx_hook(packet(AVH_REQUEST, request(step)))
+  safety.set_timer(10_200_000)
+  assert not safety.safety_tx_hook(packet(AVH_REQUEST, request(4)))
 
 
 @pytest.mark.parametrize('byte', range(8))
