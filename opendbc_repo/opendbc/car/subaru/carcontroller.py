@@ -22,6 +22,8 @@ _ANGLE_OVERRIDE_CONFIRM_FRAMES = 2
 _ANGLE_REENGAGE_MAX_STEER_RATE = 2.0
 _ANGLE_MADS_MIN_SPEED = 0.44704
 _ANGLE_MADS_MAX_STEER_ANGLE = 120.0
+_ANGLE_STALL_ERROR_DEG = 5.0
+_ANGLE_STALL_FRAMES = 8
 _ASCENT_AOL_ARM_FRAMES = 30
 _STOP_START_STARTUP_DELAY_FRAMES = 100
 # StarPilot's first populated toggle message can arrive several seconds after
@@ -47,6 +49,7 @@ class CarController(CarControllerBase):
     self.angle_override_confirm_frames = 0
     self.angle_lkas_active = False
     self.angle_handoff_active = False
+    self.angle_stall_frames = 0
     self.ascent_angle_initialized = False
     self.ascent_aol_arm_frames = 0
     self.ascent_es_distance_counter_last = None
@@ -138,6 +141,7 @@ class CarController(CarControllerBase):
     self.driver_override = False
     self.angle_override_confirm_frames = 0
     self.angle_handoff_active = False
+    self.angle_stall_frames = 0
 
   def _angle_manual_handoff(self, CS, lat_active):
     if not lat_active:
@@ -160,6 +164,18 @@ class CarController(CarControllerBase):
     if not self.angle_lkas_active and steering_rate > _ANGLE_REENGAGE_MAX_STEER_RATE:
       self.angle_handoff_active = True
       return True
+
+    # Stall guard: if commanded angle and actual wheel angle diverge significantly while
+    # LKAS is active, the driver is holding the wheel against openpilot.
+    # Yield control before Subaru's EPS rack detects a motor stall and trips Steer_Error_1.
+    angle_err = abs(self.apply_steer_last - getattr(CS.out, "steeringAngleDeg", 0.0))
+    if self.angle_lkas_active and angle_err > _ANGLE_STALL_ERROR_DEG:
+      self.angle_stall_frames += 1
+      if self.angle_stall_frames >= _ANGLE_STALL_FRAMES:
+        self.angle_handoff_active = True
+        return True
+    else:
+      self.angle_stall_frames = 0
 
     return False
 
@@ -203,8 +219,6 @@ class CarController(CarControllerBase):
 
       if lkas_active and not self.angle_lkas_active:
         self.apply_steer_last = CS.out.steeringAngleDeg
-        if hasattr(self, "angle_filter"):
-          self.angle_filter.x = CS.out.steeringAngleDeg
 
       apply_steer = apply_std_steer_angle_limits(
         apply_angle,
@@ -244,8 +258,6 @@ class CarController(CarControllerBase):
 
       if lkas_active and not self.angle_lkas_active and self.CP.carFingerprint != CAR.SUBARU_ASCENT_2023:
         self.apply_steer_last = CS.out.steeringAngleDeg
-        if hasattr(self, "angle_filter"):
-          self.angle_filter.x = CS.out.steeringAngleDeg
 
       apply_steer = apply_std_steer_angle_limits(
         apply_angle,
@@ -269,8 +281,6 @@ class CarController(CarControllerBase):
     lat_active = lkas_available and not self.driver_override and not manual_handoff
     if lat_active and not self.angle_lkas_active:
       self.apply_steer_last = CS.out.steeringAngleDeg
-      if hasattr(self, "angle_filter"):
-        self.angle_filter.x = CS.out.steeringAngleDeg
     apply_steer = apply_steer_angle_limits_vm(
       apply_angle,
       self.apply_steer_last,
@@ -354,9 +364,11 @@ class CarController(CarControllerBase):
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
       # Filter at the control-loop rate, including frames without a steering CAN message.
       v_ego = getattr(getattr(CS, "out", None), "vEgo", 0.0)
-      if CC.latActive:
+      if CC.latActive and not self.angle_handoff_active and not self.driver_override:
         self.angle_filter.update_alpha(float(np.interp(v_ego, [5.0, 10.0, 20.0], [0.3, 0.1, 0.0])))
         self.angle_filter.update(actuators.steeringAngleDeg)
+      elif self.angle_handoff_active or self.driver_override:
+        self.angle_filter.x = getattr(getattr(CS, "out", None), "steeringAngleDeg", actuators.steeringAngleDeg)
       else:
         self.angle_filter.x = actuators.steeringAngleDeg
 
@@ -411,7 +423,7 @@ class CarController(CarControllerBase):
 
         can_sends.append(subarucan.create_preglobal_es_distance(self.packer, cruise_button, CS.es_distance_msg))
 
-      if starpilot_toggles.subaru_sng:
+      if getattr(starpilot_toggles, "subaru_sng", False):
         can_sends.append(subarucan.create_preglobal_throttle(self.packer, CS.throttle_msg["COUNTER"] + 1, CS.throttle_msg,
                                                              throttle_cmd))
         if self.frame % 2 == 0:
@@ -419,22 +431,24 @@ class CarController(CarControllerBase):
                                                                   speed_cmd))
     else:
       if self.frame % 10 == 0:
-        can_sends.append(subarucan.create_es_dashstatus(self.packer, self.frame // 10, CS.es_dashstatus_msg, CC.enabled,
-                                                        self.CP.openpilotLongitudinalControl and not subaru_redneck_cruise,
-                                                        CC.longActive, hud_control.leadVisible,
-                                                        self.status_bus))
+        if getattr(CS, "es_dashstatus_msg", None) is not None:
+          can_sends.append(subarucan.create_es_dashstatus(self.packer, self.frame // 10, CS.es_dashstatus_msg, CC.enabled,
+                                                          self.CP.openpilotLongitudinalControl and not subaru_redneck_cruise,
+                                                          CC.longActive, hud_control.leadVisible,
+                                                          self.status_bus))
 
-        can_sends.append(subarucan.create_es_lkas_state(
-          self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
-          hud_control.leftLaneVisible, hud_control.rightLaneVisible,
-          hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
-        ))
+        if getattr(CS, "es_lkas_state_msg", None) is not None:
+          can_sends.append(subarucan.create_es_lkas_state(
+            self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
+            hud_control.leftLaneVisible, hud_control.rightLaneVisible,
+            hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
+          ))
 
-        if self.CP.flags & SubaruFlags.SEND_INFOTAINMENT:
+        if (self.CP.flags & SubaruFlags.SEND_INFOTAINMENT) and getattr(CS, "es_infotainment_msg", None) is not None:
           can_sends.append(subarucan.create_es_infotainment(self.packer, self.frame // 10, CS.es_infotainment_msg,
                                                            hud_control.visualAlert, self.status_bus))
 
-      if starpilot_toggles.subaru_sng:
+      if getattr(starpilot_toggles, "subaru_sng", False):
         can_sends.append(subarucan.create_throttle(self.packer, CS.throttle_msg["COUNTER"] + 1, CS.throttle_msg,
                                                    throttle_cmd))
         if self.frame % 2 == 0:
