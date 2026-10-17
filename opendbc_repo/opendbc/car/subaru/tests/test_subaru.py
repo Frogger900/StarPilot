@@ -1075,3 +1075,43 @@ def test_angle_filter_resets_while_inactive():
   controller.update(CC.as_reader(), CS, 20_000_000)
   assert controller.angle_filter.x == pytest.approx(-0.3 / 0.31)
 
+
+def test_angle_filter_tracks_wheel_during_manual_handoff():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller = CarController({}, CP)
+  CC = structs.CarControl(latActive=True)
+  CC.actuators.steeringAngleDeg = 10.0
+  CS = SimpleNamespace(out=structs.CarState(vEgo=7.0, vEgoRaw=7.0, gearShifter="drive", steeringAngleDeg=35.0))
+  controller.angle_handoff_active = True
+  controller.update(CC.as_reader(), CS, 0)
+  assert controller.angle_filter.x == 35.0
+
+
+def test_angle_stall_guard_triggers_handoff():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller = CarController({}, CP)
+  controller.angle_lkas_active = True
+  controller.apply_steer_last = -6.0
+  CS = SimpleNamespace(out=structs.CarState(steeringAngleDeg=2.0, steeringRateDeg=0.0, steeringTorque=10.0))
+
+  for frame in range(7):
+    assert not controller._angle_manual_handoff(CS, lat_active=True)
+    assert controller.angle_stall_frames == frame + 1
+
+  # On 8th frame of sustained >5.0 deg error, handoff triggers
+  assert controller._angle_manual_handoff(CS, lat_active=True)
+  assert controller.angle_handoff_active
+
+
+def test_angle_stall_guard_ignores_temporary_bump():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller = CarController({}, CP)
+  controller.angle_lkas_active = True
+  controller.apply_steer_last = 2.0
+  # Temporary bump only deflects 1.0 deg (well under 5.0 deg threshold)
+  CS = SimpleNamespace(out=structs.CarState(steeringAngleDeg=3.0, steeringRateDeg=15.0, steeringTorque=50.0))
+  for _ in range(20):
+    assert not controller._angle_manual_handoff(CS, lat_active=True)
+    assert controller.angle_stall_frames == 0
+
+
