@@ -275,10 +275,11 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     if (subaru_longitudinal) {
       violation |= longitudinal_gas_checks(cruise_throttle, SUBARU_LONG_LIMITS);
     } else {
-      // If openpilot is not controlling long, only allow ES_Distance for cruise cancel requests,
-      // (when Cruise_Cancel is true, and Cruise_Throttle is inactive)
+      // If openpilot is not controlling long, only allow ES_Distance for cruise cancel or resume requests,
+      // (when Cruise_Cancel or Cruise_Resume is true, and Cruise_Throttle is inactive)
+      bool cruise_resume = (msg->data[7] >> 2) & 1U;
       violation |= (cruise_throttle != SUBARU_LONG_LIMITS.inactive_gas);
-      violation |= (!cruise_cancel);
+      violation |= (!cruise_cancel && !cruise_resume);
     }
   }
 
