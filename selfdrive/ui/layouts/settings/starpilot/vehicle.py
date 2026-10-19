@@ -382,6 +382,11 @@ class VehicleSettingsManagerView(PanelManagerView):
           "get_state": lambda: self._controller._params.get_bool("SubaruSNGManualParkingBrake"),
           "set_state": lambda s: self._controller._on_toggle("SubaruSNGManualParkingBrake"),
         })
+      toggles.append({
+        "title": tr("Auto Resume (Stop & Go)"),
+        "get_state": lambda: self._controller._params.get_bool("SubaruAutoResume"),
+        "set_state": lambda s: self._controller._on_toggle("SubaruAutoResume"),
+      })
 
     if cs.isToyota:
       toggles.append({
