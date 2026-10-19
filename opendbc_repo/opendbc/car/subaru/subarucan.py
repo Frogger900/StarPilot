@@ -70,7 +70,9 @@ def create_es_distance(packer, frame, es_distance_msg, bus, pcm_cancel_cmd, long
 
   if resume_cmd:
     values["Cruise_Resume"] = 1
-    values["Cruise_Throttle"] = 1818 # inactive throttle
+    # Preserve stock standstill idle throttle (808 on Gen 2), defaulting to inactive throttle (1818)
+    throttle = values.get("Cruise_Throttle", 1818)
+    values["Cruise_Throttle"] = throttle if throttle <= 1818 else 1818
 
   return packer.make_can_msg("ES_Distance", bus, values)
 

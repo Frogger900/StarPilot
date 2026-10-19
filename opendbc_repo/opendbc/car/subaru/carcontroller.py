@@ -509,7 +509,7 @@ class CarController(CarControllerBase):
           )
 
           if should_resume and self.auto_resume_frames_remaining == 0:
-            self.auto_resume_frames_remaining = 3 # 3 frames at 20Hz = 150ms
+            self.auto_resume_frames_remaining = 10 # 10 frames at 20Hz = 500ms
             self.auto_resume_cooldown_frames = 100 # 2s cooldown
 
           if self.auto_resume_frames_remaining > 0 and cancel_frame_ready:
