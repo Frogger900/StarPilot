@@ -77,6 +77,25 @@ def create_es_distance(packer, frame, es_distance_msg, bus, pcm_cancel_cmd, long
   return packer.make_can_msg("ES_Distance", bus, values)
 
 
+def create_es_distance_gen2(es_distance_msg_221, bus):
+  if len(es_distance_msg_221) == 4:
+    dat_221 = es_distance_msg_221[2]
+  else:
+    dat_221 = es_distance_msg_221[1]
+  dat_22c = bytearray(8)
+  dat_22c[1] = 0x70 | (dat_221[1] & 0x0F)
+  dat_22c[2] = dat_221[2]
+  dat_22c[3] = dat_221[3]
+  dat_22c[4] = dat_221[4] & 0xF0
+  dat_22c[5] = dat_221[5]
+  dat_22c[6] = dat_221[6]
+  dat_22c[7] = 0x90 | (dat_221[7] & 0x07)
+  # Standard Subaru checksum: (addr_low + addr_high + sum(data[1:])) & 0xFF
+  # For 0x22C: addr_low = 0x2C, addr_high = 0x02. Sum = 0x2E
+  dat_22c[0] = (0x2E + sum(dat_22c[1:])) & 0xFF
+  return 0x22C, bytes(dat_22c), bus
+
+
 def create_cruise_buttons(packer, frame, cruise_buttons_msg, button, bus=CanBus.main):
   values = {s: cruise_buttons_msg[s] for s in [
     "CHECKSUM",
