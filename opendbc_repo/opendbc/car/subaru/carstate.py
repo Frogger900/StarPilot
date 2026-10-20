@@ -31,8 +31,6 @@ class CarState(CarStateBase):
     self.cruise_buttons_msg = {}
     self.es_lkas_alert_dat = b""
     self.cruise_buttons = {button: 0 for button in SUBARU_CRUISE_BUTTONS}
-    self.es_distance_msg = {}
-    self.close_distance = 0.0
 
   def update(self, can_parsers, starpilot_toggles) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -145,6 +143,7 @@ class CarState(CarStateBase):
       self.es_lkas_state_msg = copy.copy(cp_cam.vl["ES_LKAS_State"])
       self.es_brake_msg = copy.copy(cp_es_brake.vl["ES_Brake"])
 
+      # TODO: Hybrid cars don't have ES_Distance, need a replacement
       if not (self.CP.flags & SubaruFlags.HYBRID):
         # 8 is known AEB, there are a few other values related to AEB we ignore
         ret.stockAeb = (cp_es_distance.vl["ES_Brake"]["AEB_Status"] == 8) and \
@@ -152,8 +151,6 @@ class CarState(CarStateBase):
 
         self.es_status_msg = copy.copy(cp_es_brake.vl["ES_Status"])
         self.cruise_control_msg = copy.copy(cp_cruise.vl["CruiseControl"])
-        self.es_distance_msg = copy.copy(cp_es_distance.vl["ES_Distance"])
-        self.close_distance = cp_es_distance.vl["ES_Distance"]["Close_Distance"]
 
       if self.CP.carFingerprint in SUBARU_REDNECK_CRUISE_CARS:
         cruise_buttons = cp.vl["Cruise_Buttons"]

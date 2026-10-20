@@ -3643,15 +3643,6 @@
         "settings_tier": "simple"
       },
       {
-        "key": "SubaruAutoResume",
-        "label": "Subaru Auto Resume (Stop & Go)",
-        "description": "Automatically resumes cruise control from a standstill when the lead vehicle drives away on supported Global Gen 2 and angle-capable Subaru vehicles.",
-        "picker_description": "Auto-resumes from standstill when lead vehicle departs on supported Subarus.",
-        "data_type": "bool",
-        "ui_type": "toggle",
-        "settings_tier": "simple"
-      },
-      {
         "key": "SubaruStopStartOff",
         "label": "Stop/Start Off at Startup",
         "description": "For supported Subaru Outback 2023-24 and Legacy 2025 vehicles, send one momentary Stop/Start request after ignition while stationary and in Park or Neutral.",

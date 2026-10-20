@@ -55,9 +55,6 @@ class CarController(CarControllerBase):
     self.ascent_aol_arm_frames = 0
     self.ascent_es_distance_counter_last = None
     self.ascent_lkas_alert_counter_last = None
-    self.auto_resume_frames_remaining = 0
-    self.auto_resume_cooldown_frames = 0
-    self.es_distance_counter_last = None
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -462,78 +459,18 @@ class CarController(CarControllerBase):
           can_sends.append(subarucan.create_es_brake(self.packer, self.frame // 5, CS.es_brake_msg,
                                                      self.CP.openpilotLongitudinalControl, CC.longActive, cruise_brake))
 
-          msg_221 = subarucan.create_es_distance(self.packer, self.frame // 5, CS.es_distance_msg, 0, pcm_cancel_cmd,
-                                                self.CP.openpilotLongitudinalControl, cruise_brake > 0, cruise_throttle)
-          can_sends.append(msg_221)
-          if self.CP.flags & SubaruFlags.GLOBAL_GEN2:
-            can_sends.append(subarucan.create_es_distance_gen2(msg_221, 0))
+          can_sends.append(subarucan.create_es_distance(self.packer, self.frame // 5, CS.es_distance_msg, 0, pcm_cancel_cmd,
+                                                        self.CP.openpilotLongitudinalControl, cruise_brake > 0, cruise_throttle))
       else:
-        es_distance_msg = getattr(CS, "es_distance_msg", None)
         cancel_frame_ready = True
-        if es_distance_msg and "COUNTER" in es_distance_msg:
-          stock_counter = es_distance_msg["COUNTER"]
-          cancel_frame_ready = stock_counter != self.es_distance_counter_last
-          if cancel_frame_ready:
-            self.es_distance_counter_last = stock_counter
-        else:
-          cancel_frame_ready = False
-
+        if self.CP.carFingerprint == CAR.SUBARU_ASCENT_2023:
+          stock_counter = CS.es_distance_msg["COUNTER"]
+          cancel_frame_ready = stock_counter != self.ascent_es_distance_counter_last
+          self.ascent_es_distance_counter_last = stock_counter
         if pcm_cancel_cmd and cancel_frame_ready:
-          if not (self.CP.flags & SubaruFlags.HYBRID) and es_distance_msg:
+          if not (self.CP.flags & SubaruFlags.HYBRID):
             bus = CanBus.alt_for_cp(self.CP) if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else self.main_bus
-            msg_221 = subarucan.create_es_distance(self.packer, (CS.es_distance_msg["COUNTER"] + 1) % 0x10, CS.es_distance_msg, bus, pcm_cancel_cmd)
-            can_sends.append(msg_221)
-            if self.CP.flags & SubaruFlags.GLOBAL_GEN2:
-              can_sends.append(subarucan.create_es_distance_gen2(msg_221, bus))
-        elif getattr(starpilot_toggles, "subaru_auto_resume", False) and not (self.CP.flags & SubaruFlags.HYBRID) and es_distance_msg:
-          if self.auto_resume_cooldown_frames > 0:
-            self.auto_resume_cooldown_frames -= 1
-
-          in_standstill = getattr(getattr(CS, "out", None), "standstill", False) and \
-                          getattr(getattr(getattr(CS, "out", None), "cruiseState", None), "standstill", False)
-          if not in_standstill:
-            self.last_standstill_frame = self.frame
-            self.auto_resume_frames_remaining = 0
-            self.prev_close_distance = getattr(CS, "close_distance", 0.0)
-
-          standstill_duration = (self.frame - self.last_standstill_frame) * DT_CTRL
-          close_dist = getattr(CS, "close_distance", 0.0)
-
-          # Lead moved if close distance expanded significantly or crossed the threshold
-          lead_departed = (
-            close_dist > 3.0 or
-            (close_dist > 2.0 and close_dist > self.prev_close_distance + 0.3)
-          )
-
-          should_resume = (
-            getattr(CC, "enabled", False) and
-            in_standstill and
-            standstill_duration > 1.0 and
-            self.auto_resume_cooldown_frames == 0 and
-            getattr(hud_control, "leadVisible", False) and
-            lead_departed
-          )
-
-          if should_resume and self.auto_resume_frames_remaining == 0:
-            self.auto_resume_frames_remaining = 10 # 10 frames at 20Hz = 500ms
-            self.auto_resume_cooldown_frames = 100 # 2s cooldown
-
-          if self.auto_resume_frames_remaining > 0 and cancel_frame_ready:
-            self.auto_resume_frames_remaining -= 1
-            bus = CanBus.alt_for_cp(self.CP) if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else self.main_bus
-            msg_221 = subarucan.create_es_distance(
-              self.packer,
-              (CS.es_distance_msg["COUNTER"] + 1) % 0x10,
-              CS.es_distance_msg,
-              bus,
-              pcm_cancel_cmd=False,
-              resume_cmd=True,
-            )
-            can_sends.append(msg_221)
-            if self.CP.flags & SubaruFlags.GLOBAL_GEN2:
-              can_sends.append(subarucan.create_es_distance_gen2(msg_221, bus))
-
-          self.prev_close_distance = close_dist
+            can_sends.append(subarucan.create_es_distance(self.packer, CS.es_distance_msg["COUNTER"] + 1, CS.es_distance_msg, bus, pcm_cancel_cmd))
 
       if subaru_redneck_cruise:
         redneck_button = {

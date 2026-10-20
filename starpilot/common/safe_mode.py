@@ -212,7 +212,6 @@ SAFE_MODE_MANAGED_KEYS = (
   "SubaruSNGManualParkingBrake",
   "SubaruStopStartOff",
   "SubaruAvhStartup",
-  "SubaruAutoResume",
   "SubaruRedneckCruise",
   "VoltSNG",
   "JeepBrakeHold",
@@ -233,7 +232,6 @@ SAFE_MODE_FIXED_VALUES = {
   "UseAutoSteerDelay": True,
   "SubaruStopStartOff": False,
   "SubaruAvhStartup": False,
-  "SubaruAutoResume": False,
   "SubaruRedneckCruise": False,
   PERSONALITY_PROFILES_PARAM: profile_document(default_personality_profiles(False), enabled=False),
 }

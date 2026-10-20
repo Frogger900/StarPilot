@@ -31,7 +31,6 @@
 #define MSG_SUBARU_ES_LKAS_ANGLE         0x124U
 #define MSG_SUBARU_ES_Brake              0x220U
 #define MSG_SUBARU_ES_Distance           0x221U
-#define MSG_SUBARU_ES_Distance_Gen2      0x22cU
 #define MSG_SUBARU_ES_Status             0x222U
 #define MSG_SUBARU_ES_DashStatus         0x321U
 #define MSG_SUBARU_ES_LKAS_State         0x322U
@@ -57,8 +56,7 @@
   {MSG_SUBARU_ES_Infotainment,   SUBARU_MAIN_BUS, 8, .check_relay = true},  \
 
 #define SUBARU_COMMON_TX_MSGS(alt_bus) \
-  {MSG_SUBARU_ES_Distance,      alt_bus, 8, .check_relay = false}, \
-  {MSG_SUBARU_ES_Distance_Gen2, alt_bus, 8, .check_relay = false}, \
+  {MSG_SUBARU_ES_Distance, alt_bus, 8, .check_relay = false}, \
 
 #define SUBARU_REDNECK_TX_MSGS() \
   {MSG_SUBARU_Cruise_Buttons, SUBARU_MAIN_BUS, 8, .check_relay = false}, \
@@ -270,19 +268,17 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
   }
 
   // check es_distance cruise_throttle limits
-  if ((msg->addr == MSG_SUBARU_ES_Distance) || (msg->addr == MSG_SUBARU_ES_Distance_Gen2)) {
+  if (msg->addr == MSG_SUBARU_ES_Distance) {
     int cruise_throttle = (GET_BYTES(msg, 2, 2) & 0x1FFFU);
     bool cruise_cancel = (msg->data[7] >> 0) & 1U;
 
     if (subaru_longitudinal) {
       violation |= longitudinal_gas_checks(cruise_throttle, SUBARU_LONG_LIMITS);
     } else {
-      // If openpilot is not controlling long, only allow ES_Distance for cruise cancel or resume requests,
-      // (when Cruise_Cancel or Cruise_Resume is true, and Cruise_Throttle is inactive)
-      bool cruise_resume = (msg->data[7] >> 2) & 1U;
-      bool valid_throttle = (cruise_throttle == SUBARU_LONG_LIMITS.inactive_gas) || (cruise_throttle == SUBARU_LONG_LIMITS.min_gas);
-      violation |= !valid_throttle;
-      violation |= (!cruise_cancel && !cruise_resume);
+      // If openpilot is not controlling long, only allow ES_Distance for cruise cancel requests,
+      // (when Cruise_Cancel is true, and Cruise_Throttle is inactive)
+      violation |= (cruise_throttle != SUBARU_LONG_LIMITS.inactive_gas);
+      violation |= (!cruise_cancel);
     }
   }
 
