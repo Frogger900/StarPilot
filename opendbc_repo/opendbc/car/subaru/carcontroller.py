@@ -427,8 +427,11 @@ class CarController(CarControllerBase):
           can_sends.append(subarucan.create_es_brake(self.packer, self.frame // 5, CS.es_brake_msg,
                                                      self.CP.openpilotLongitudinalControl, CC.longActive, cruise_brake))
 
-          can_sends.append(subarucan.create_es_distance(self.packer, self.frame // 5, CS.es_distance_msg, 0, pcm_cancel_cmd,
-                                                        self.CP.openpilotLongitudinalControl, cruise_brake > 0, cruise_throttle))
+          msg_221 = subarucan.create_es_distance(self.packer, self.frame // 5, CS.es_distance_msg, 0, pcm_cancel_cmd,
+                                                self.CP.openpilotLongitudinalControl, cruise_brake > 0, cruise_throttle)
+          can_sends.append(msg_221)
+          if self.CP.flags & SubaruFlags.GLOBAL_GEN2:
+            can_sends.append(subarucan.create_es_distance_gen2(msg_221, 0))
       else:
         es_distance_msg = getattr(CS, "es_distance_msg", None)
         cancel_frame_ready = True
@@ -443,7 +446,10 @@ class CarController(CarControllerBase):
         if pcm_cancel_cmd and cancel_frame_ready:
           if not (self.CP.flags & SubaruFlags.HYBRID) and es_distance_msg:
             bus = CanBus.alt_for_cp(self.CP) if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else self.main_bus
-            can_sends.append(subarucan.create_es_distance(self.packer, (CS.es_distance_msg["COUNTER"] + 1) % 0x10, CS.es_distance_msg, bus, pcm_cancel_cmd))
+            msg_221 = subarucan.create_es_distance(self.packer, (CS.es_distance_msg["COUNTER"] + 1) % 0x10, CS.es_distance_msg, bus, pcm_cancel_cmd)
+            can_sends.append(msg_221)
+            if self.CP.flags & SubaruFlags.GLOBAL_GEN2:
+              can_sends.append(subarucan.create_es_distance_gen2(msg_221, bus))
         elif getattr(starpilot_toggles, "subaru_auto_resume", False) and not (self.CP.flags & SubaruFlags.HYBRID) and es_distance_msg:
           if self.auto_resume_cooldown_frames > 0:
             self.auto_resume_cooldown_frames -= 1
@@ -480,14 +486,17 @@ class CarController(CarControllerBase):
           if self.auto_resume_frames_remaining > 0 and cancel_frame_ready:
             self.auto_resume_frames_remaining -= 1
             bus = CanBus.alt_for_cp(self.CP) if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else self.main_bus
-            can_sends.append(subarucan.create_es_distance(
+            msg_221 = subarucan.create_es_distance(
               self.packer,
               (CS.es_distance_msg["COUNTER"] + 1) % 0x10,
               CS.es_distance_msg,
               bus,
               pcm_cancel_cmd=False,
               resume_cmd=True,
-            ))
+            )
+            can_sends.append(msg_221)
+            if self.CP.flags & SubaruFlags.GLOBAL_GEN2:
+              can_sends.append(subarucan.create_es_distance_gen2(msg_221, bus))
 
           self.prev_close_distance = close_dist
 
