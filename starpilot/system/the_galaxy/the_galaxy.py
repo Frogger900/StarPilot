@@ -3578,19 +3578,56 @@ def _safe_params_get(key, encoding=None, default=None):
       return params.get(key, encoding=encoding)
     return params.get(key)
   except Exception:
+    try:
+      p = Path(params.get_param_path(key))
+      if p.is_file():
+        content = p.read_text(encoding="utf-8")
+        return content if encoding else content.encode("utf-8")
+    except Exception:
+      pass
     return default
 
 def _safe_params_get_live_raw(key, default=None, block=False):
   try:
     return _params_live_raw.get(key, block=block)
   except Exception:
+    try:
+      p = Path(params.get_param_path(key))
+      if p.is_file():
+        return p.read_bytes()
+    except Exception:
+      pass
     return default
 
 def _safe_params_get_bool(key, default=False):
   try:
     return params.get_bool(key)
   except Exception:
+    try:
+      p = Path(params.get_param_path(key))
+      if p.is_file():
+        return p.read_text(encoding="utf-8").strip() in ("1", "true", "True")
+    except Exception:
+      pass
     return bool(default)
+
+def _safe_params_put(key, val):
+  try:
+    if isinstance(val, bool):
+      params.put_bool(key, val)
+    else:
+      params.put(key, str(val))
+    return True
+  except Exception:
+    try:
+      p = Path(params.get_param_path(key))
+      p.parent.mkdir(parents=True, exist_ok=True)
+      content = ("1" if val else "0") if isinstance(val, bool) else str(val)
+      p.write_text(content, encoding="utf-8")
+      return True
+    except Exception as e:
+      app.logger.warning(f"Failed fallback write for param {key}: {e}")
+      return False
 
 def _personality_settings_write_locked():
   return _safe_params_get_bool("IsOnroad", default=True) or not _safe_params_get_bool("IsOffroad", default=False)
@@ -6740,7 +6777,7 @@ def setup(app):
         params.put(key, str_val)
         params.put_bool(CUSTOM_ACCEL_PROFILE_INITIALIZED_KEY, True)
       else:
-        params.put(key, str_val)
+        _safe_params_put(key, str_val)
 
       gsm_metered_apply_result = None
       if key == "GsmMetered":
@@ -6784,6 +6821,13 @@ def setup(app):
           response["warning"] = " ".join(warnings)
       if updated:
         response["updated"] = updated
+      else:
+        _, value_types = _get_param_type_info()
+        resolved_type = value_types.get(key, str)
+        if resolved_type == bool:
+          response["updated"] = {key: str_val.strip() in ("1", "true", "True")}
+        else:
+          response["updated"] = {key: str_val}
 
       return jsonify(response), 200
 
