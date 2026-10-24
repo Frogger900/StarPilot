@@ -17,7 +17,7 @@ MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 _SNG_ACC_MIN_DIST = 3
 _SNG_ACC_MAX_DIST = 4.5
 _LEGACY_2025_MADS_MIN_SPEED = 0.44704
-_LEGACY_2025_MADS_MAX_STEER_ANGLE = 120.0
+_LEGACY_2025_MADS_MAX_STEER_ANGLE = 200.0
 _ANGLE_OVERRIDE_CONFIRM_FRAMES = 2
 _ANGLE_REENGAGE_MAX_STEER_RATE = 2.0
 _ANGLE_MADS_MIN_SPEED = 0.44704
@@ -215,8 +215,11 @@ class CarController(CarControllerBase):
 
     if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
       mads_only = CC.latActive and not CC.enabled
+      if mads_only:
+        apply_angle = float(np.clip(apply_angle, -_LEGACY_2025_MADS_MAX_STEER_ANGLE, _LEGACY_2025_MADS_MAX_STEER_ANGLE))
+
       mads_only_ok = CS.out.vEgoRaw > _LEGACY_2025_MADS_MIN_SPEED and \
-        abs(CS.out.steeringAngleDeg) < _LEGACY_2025_MADS_MAX_STEER_ANGLE
+        abs(CS.out.steeringAngleDeg) <= (_LEGACY_2025_MADS_MAX_STEER_ANGLE + 10.0)
       lkas_available = CC.latActive and (not mads_only or mads_only_ok) and \
         CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
 
