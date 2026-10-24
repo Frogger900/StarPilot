@@ -3481,10 +3481,14 @@ def _get_param_type_info():
           types[k] = str
 
     for k, dt in _get_layout_type_overrides().items():
-      if k in types and dt in ("int", "float") and types[k] == bool:
-        types[k] = float if dt == "float" else int
-      elif k in types and dt == "bool":
-        types[k] = bool
+      if k not in EXCLUDED_KEYS:
+        _cached_allowed_keys.add(k)
+        if k not in types:
+          types[k] = float if dt == "float" else (int if dt == "int" else (bool if dt == "bool" else str))
+        elif dt in ("int", "float") and types[k] == bool:
+          types[k] = float if dt == "float" else int
+        elif dt == "bool":
+          types[k] = bool
 
     # Zero-valued offsets must stay numeric; legacy inference treats "0" as bool.
     from openpilot.starpilot.common.screen_settings import SCREEN_INT_KEYS
@@ -3518,6 +3522,15 @@ def _get_static_default_param_values():
       for key, default_val, _, _ in starpilot_default_params
       if key not in EXCLUDED_KEYS
     }
+    for k, meta in _get_layout_param_metadata().items():
+      if k not in EXCLUDED_KEYS and k not in _cached_static_default_values:
+        dt = meta.get("data_type", "bool")
+        if dt == "bool":
+          _cached_static_default_values[k] = True if meta.get("default") in (True, "1", 1) else False
+        elif dt in ("int", "float"):
+          _cached_static_default_values[k] = meta.get("default", 0)
+        else:
+          _cached_static_default_values[k] = meta.get("default", "")
   return _cached_static_default_values
 
 def _get_default_param_values():
