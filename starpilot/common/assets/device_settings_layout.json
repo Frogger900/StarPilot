@@ -3312,6 +3312,17 @@
         "picker_description": "Plays the blind-spot alert when steering is paused.",
         "data_type": "bool",
         "ui_type": "toggle",
+        "is_parent_toggle": true,
+        "settings_tier": "simple"
+      },
+      {
+        "key": "LoudBlindspotAlertMuteAtStandstill",
+        "label": "Mute Blind Spot Alert At Standstill",
+        "description": "Mute the audible blind spot alert while stopped or at a standstill (e.g. waiting in a turn lane at a red light). Visual blind spot alerts remain active.",
+        "picker_description": "Mutes the blind spot alert sound while the vehicle is stopped.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "parent_key": "LoudBlindspotAlertWhenDisengaged",
         "settings_tier": "simple"
       },
       {

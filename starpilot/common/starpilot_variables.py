@@ -943,6 +943,7 @@ class StarPilotVariables:
     toggle.lead_departing_alert = self.get_value("LeadDepartingAlert")
     toggle.loud_blindspot_alert = self.get_value("LoudBlindspotAlert", condition=has_bsm)
     toggle.loud_blindspot_alert_when_disengaged = self.get_value("LoudBlindspotAlertWhenDisengaged", condition=has_bsm)
+    toggle.loud_blindspot_alert_mute_at_standstill = self.get_value("LoudBlindspotAlertMuteAtStandstill", condition=toggle.loud_blindspot_alert_when_disengaged)
     toggle.speed_limit_changed_alert = self.get_value("SpeedLimitChangedAlert")
 
     toggle.custom_personalities = toggle.openpilot_longitudinal and self.get_value("CustomPersonalities")
@@ -1604,6 +1605,7 @@ class StarPilotVariables:
       toggle.lead_departing_alert = False
       toggle.loud_blindspot_alert = False
       toggle.loud_blindspot_alert_when_disengaged = False
+      toggle.loud_blindspot_alert_mute_at_standstill = False
       toggle.speed_limit_changed_alert = False
 
       toggle.startup_alert_top = "Be ready to take over at any time"

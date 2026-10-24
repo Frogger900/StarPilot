@@ -282,6 +282,7 @@ class StarPilotSoundsLayout(_SettingsPage):
     "LeadDepartingAlert",
     "LoudBlindspotAlert",
     "LoudBlindspotAlertWhenDisengaged",
+    "LoudBlindspotAlertMuteAtStandstill",
     "SpeedLimitChangedAlert",
   ]
 
@@ -327,6 +328,12 @@ class StarPilotSoundsLayout(_SettingsPage):
         "title": tr_noop("Loud While Paused"),
         "subtitle": "",
         "is_enabled": lambda: starpilot_state.car_state.hasBSM,
+        "disabled_label": tr_noop("Needs BSM")
+      },
+      "LoudBlindspotAlertMuteAtStandstill": {
+        "title": tr_noop("Mute at Stop"),
+        "subtitle": "",
+        "is_enabled": lambda: starpilot_state.car_state.hasBSM and self._params.get_bool("LoudBlindspotAlertWhenDisengaged"),
         "disabled_label": tr_noop("Needs BSM")
       },
       "SpeedLimitChangedAlert": {

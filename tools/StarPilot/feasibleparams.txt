@@ -185,6 +185,7 @@ LongitudinalPersonalityProfiles
 LongitudinalTune
 LoudBlindspotAlert
 LoudBlindspotAlertWhenDisengaged
+LoudBlindspotAlertMuteAtStandstill
 LowVoltageShutdown
 MainCruiseButtonControl
 MapAcceleration

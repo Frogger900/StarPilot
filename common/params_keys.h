@@ -487,6 +487,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LongitudinalTune", {PERSISTENT, BOOL, "1", "0", 0, SETTINGS_SIMPLE}},
     {"LoudBlindspotAlert", {PERSISTENT, BOOL, "0", "0", 0, SETTINGS_SIMPLE}},
     {"LoudBlindspotAlertWhenDisengaged", {PERSISTENT, BOOL, "0", "0", 0, SETTINGS_SIMPLE}},
+    {"LoudBlindspotAlertMuteAtStandstill", {PERSISTENT, BOOL, "1", "1", 0, SETTINGS_SIMPLE}},
     {"LowVoltageShutdown", {PERSISTENT, FLOAT, "11.8", "11.8", 3, SETTINGS_SIMPLE}},
     {"MainCruiseButtonControl", {PERSISTENT, INT, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ManualUpdateInitiated", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},

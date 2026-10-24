@@ -11,12 +11,15 @@ LaneChangeDirection = log.LaneChangeDirection
 StarPilotEventName = custom.StarPilotOnroadEvent.EventName
 
 
-def _car_state(left_blinker=False, right_blinker=False, left_blindspot=False, right_blindspot=False):
+def _car_state(left_blinker=False, right_blinker=False, left_blindspot=False, right_blindspot=False,
+               standstill=False, v_ego=15.0):
   return SimpleNamespace(
     leftBlinker=left_blinker,
     rightBlinker=right_blinker,
     leftBlindspot=left_blindspot,
     rightBlindspot=right_blindspot,
+    standstill=standstill,
+    vEgo=v_ego,
   )
 
 
@@ -30,10 +33,12 @@ def _sm(lane_change_state=LaneChangeState.off, lane_change_direction=LaneChangeD
   }
 
 
-def _toggles(enabled=True, loud_enabled=True):
+def _toggles(enabled=True, loud_enabled=True, mute_standstill=True, min_speed=10.0):
   return SimpleNamespace(
     loud_blindspot_alert=loud_enabled,
     loud_blindspot_alert_when_disengaged=enabled,
+    loud_blindspot_alert_mute_at_standstill=mute_standstill,
+    minimum_lane_change_speed=min_speed,
   )
 
 
@@ -123,3 +128,14 @@ def test_disabled_starpilot_warnings_stay_filtered_without_blindspot_event():
   assert ET.WARNING not in alert_types
   assert ET.WARNING in clear_event_types
   assert events.create_alerts(alert_types) == []
+
+
+def test_loud_blindspot_alert_without_lateral_muted_at_standstill():
+  CS_stopped = _car_state(left_blinker=True, left_blindspot=True, standstill=True, v_ego=0.0)
+  assert not should_loud_blindspot_alert_without_lateral(CS_stopped, _sm(), _toggles(mute_standstill=True))
+
+  CS_slow = _car_state(left_blinker=True, left_blindspot=True, standstill=False, v_ego=5.0)
+  assert not should_loud_blindspot_alert_without_lateral(CS_slow, _sm(), _toggles(mute_standstill=True, min_speed=10.0))
+
+  # When mute_at_standstill is False, stopped alert is allowed
+  assert should_loud_blindspot_alert_without_lateral(CS_stopped, _sm(), _toggles(mute_standstill=False))

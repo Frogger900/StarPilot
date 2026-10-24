@@ -96,6 +96,13 @@ def should_loud_blindspot_alert_without_lateral(CS, sm, starpilot_toggles, combi
   if not getattr(starpilot_toggles, "loud_blindspot_alert_when_disengaged", False):
     return False
 
+  if getattr(starpilot_toggles, "loud_blindspot_alert_mute_at_standstill", True):
+    if getattr(CS, "standstill", False):
+      return False
+    min_speed = getattr(starpilot_toggles, "minimum_lane_change_speed", 0.0)
+    if getattr(CS, "vEgo", 0.0) < (min_speed if min_speed > 0.0 else 1.0):
+      return False
+
   combined_left_bsm = CS.leftBlindspot if combined_left_bsm is None else combined_left_bsm
   combined_right_bsm = CS.rightBlindspot if combined_right_bsm is None else combined_right_bsm
   left_signal_blocked = bool(CS.leftBlinker and combined_left_bsm)
