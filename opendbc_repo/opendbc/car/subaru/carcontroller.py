@@ -320,12 +320,12 @@ class CarController(CarControllerBase):
     return subarucan.create_steering_control(self.packer, apply_torque, apply_steer_req)
 
   def _lkas_status_active(self, CC):
-    if self.CP.carFingerprint in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_OUTBACK_2023):
+    if self.CP.carFingerprint in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_LEGACY_2025):
       return self.angle_lkas_active
     return CC.latActive
 
   def _ascent_lkas_alert(self, CC, CS):
-    if self.CP.carFingerprint != CAR.SUBARU_ASCENT_2023 or not self.CP.flags & SubaruFlags.ASCENT_LKAS_ALERT:
+    if self.CP.carFingerprint not in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025) or not self.CP.flags & SubaruFlags.ASCENT_LKAS_ALERT:
       return None
     dat = getattr(CS, "es_lkas_alert_dat", b"")
     msg = subarucan.create_ascent_lkas_alert(dat, self._lkas_status_active(CC), CC.hudControl.visualAlert)

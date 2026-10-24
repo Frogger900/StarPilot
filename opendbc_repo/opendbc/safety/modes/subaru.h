@@ -332,6 +332,13 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_STOP_START_TX_MSGS(SUBARU_ALT_BUS)
     {0x6BBU, SUBARU_ALT_BUS, 8, .check_relay = false},
   };
+  static const CanMsg SUBARU_LEGACY_AVH_ALERT_TX_MSGS[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
+    SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
+    SUBARU_STOP_START_TX_MSGS(SUBARU_ALT_BUS)
+    {0x6BBU, SUBARU_ALT_BUS, 8, .check_relay = false},
+    {MSG_SUBARU_ES_LKAS_Alert, SUBARU_MAIN_BUS, 8, .check_relay = true},
+  };
   static const CanMsg SUBARU_TX_MSGS[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_MAIN_BUS, MSG_SUBARU_ES_LKAS)
     SUBARU_COMMON_TX_MSGS(SUBARU_MAIN_BUS)
@@ -392,6 +399,13 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
     SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
     SUBARU_STOP_START_TX_MSGS(SUBARU_ALT_BUS)
+  };
+
+  static const CanMsg SUBARU_GEN2_LKAS_ANGLE_STOP_START_ALERT_TX_MSGS[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
+    SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
+    SUBARU_STOP_START_TX_MSGS(SUBARU_ALT_BUS)
+    {MSG_SUBARU_ES_LKAS_Alert, SUBARU_MAIN_BUS, 8, .check_relay = true},
   };
 
   static const CanMsg SUBARU_D_PLATFORM_ANGLE_MAIN_TX_MSGS[] = {
@@ -468,7 +482,8 @@ static safety_config subaru_init(uint16_t param) {
     ret = subaru_d_platform ? (subaru_stop_start_button ? BUILD_SAFETY_CFG(subaru_d_platform_angle_rx_checks, SUBARU_D_PLATFORM_ANGLE_STOP_START_MAIN_TX_MSGS) : \
                               (subaru_d_platform_camera ? BUILD_SAFETY_CFG(subaru_d_platform_angle_rx_checks, SUBARU_D_PLATFORM_ANGLE_CAMERA_TX_MSGS) : \
                               BUILD_SAFETY_CFG(subaru_d_platform_angle_rx_checks, SUBARU_D_PLATFORM_ANGLE_MAIN_TX_MSGS))) : \
-          subaru_gen2 ? (subaru_ascent_lkas_alert ? BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_ASCENT_LKAS_ALERT_TX_MSGS) : \
+          subaru_gen2 ? (subaru_ascent_lkas_alert ? (subaru_stop_start_button ? BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_GEN2_LKAS_ANGLE_STOP_START_ALERT_TX_MSGS) : \
+                                                                                 BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_ASCENT_LKAS_ALERT_TX_MSGS)) : \
                         subaru_stop_start_button ? BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_GEN2_LKAS_ANGLE_STOP_START_TX_MSGS) : \
                          BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_GEN2_LKAS_ANGLE_TX_MSGS)) : \
                         BUILD_SAFETY_CFG(subaru_lkas_angle_rx_checks, SUBARU_LKAS_ANGLE_TX_MSGS);
@@ -489,7 +504,8 @@ static safety_config subaru_init(uint16_t param) {
 #endif
   subaru_avh_init(avh_enabled);
   if (avh_enabled) {
-    ret = BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_LEGACY_AVH_TX_MSGS);
+    ret = subaru_ascent_lkas_alert ? BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_LEGACY_AVH_ALERT_TX_MSGS) : \
+                                     BUILD_SAFETY_CFG(subaru_gen2_lkas_angle_rx_checks, SUBARU_LEGACY_AVH_TX_MSGS);
   }
   return ret;
 }

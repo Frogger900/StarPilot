@@ -884,7 +884,7 @@ def test_secondary_lkas_alert_is_detected_only_on_ascent(platform):
   fingerprint = gen_empty_fingerprint()
   fingerprint[CanBus.camera][0x3C4] = 8
   CP = CarInterface.get_params(platform, fingerprint, [], False, False, False, None)
-  expected = platform == CAR.SUBARU_ASCENT_2023
+  expected = platform in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025)
   assert bool(CP.flags & SubaruFlags.ASCENT_LKAS_ALERT) == expected
   assert bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.ASCENT_LKAS_ALERT) == expected
   assert (0x3C4 in CarState.get_can_parsers(CP)[Bus.cam].addresses) == expected
@@ -917,7 +917,7 @@ def test_ascent_secondary_hands_on_payload_is_filtered_only_during_active_latera
 
 @pytest.mark.parametrize("payload", [
   "000000000000", "000000110000", "000000100000", "1e0030000000",
-  "000704000000", "000000010000", "1b0002000000", "000002000000",
+  "000704000000", "000000010000",
   "0e0000000000", "190000100000", "1c0704000000", "190000110000",
   "190000000000", "190000010000", "010104000000", "000604000000",
 ])
@@ -927,13 +927,26 @@ def test_ascent_secondary_alert_preserves_other_alerts_and_opaque_data(payload):
   assert subarucan.create_ascent_lkas_alert(bytes(raw), True, structs.CarControl.HUDControl.VisualAlert.none)[1] == raw
 
 
+@pytest.mark.parametrize("payload", ["1b0002000000", "000002000000"])
+def test_legacy_hud_double_yellow_is_filtered_during_active_lateral(payload):
+  raw = bytearray(bytes.fromhex("0000" + payload))
+  raw[0] = (0xc4 + 3 + sum(raw[1:])) & 0xff
+  address, dat, bus = subarucan.create_ascent_lkas_alert(bytes(raw), True, structs.CarControl.HUDControl.VisualAlert.none)
+  assert address == 0x3C4
+  assert bus == CanBus.main
+  assert dat[1] == raw[1]
+  assert dat[0] == ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
+  assert dat[2:] == bytes(6)
+
+
 @pytest.mark.parametrize("raw", [b"", bytes(7), bytes(9), bytes.fromhex("0002000104000000")])
 def test_ascent_secondary_alert_does_not_transmit_invalid_data(raw):
   assert subarucan.create_ascent_lkas_alert(raw, True, structs.CarControl.HUDControl.VisualAlert.none) is None
 
 
-def test_ascent_secondary_alert_uses_fresh_camera_counter_and_actual_angle_request():
-  CP = CarInterface.get_non_essential_params(CAR.SUBARU_ASCENT_2023)
+@pytest.mark.parametrize("platform", [CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025])
+def test_ascent_secondary_alert_uses_fresh_camera_counter_and_actual_angle_request(platform):
+  CP = CarInterface.get_non_essential_params(platform)
   CP.flags |= SubaruFlags.ASCENT_LKAS_ALERT.value
   controller = CarController({}, CP)
   CC = SimpleNamespace(latActive=True, hudControl=SimpleNamespace(visualAlert=structs.CarControl.HUDControl.VisualAlert.none))
@@ -953,7 +966,7 @@ def test_ascent_secondary_alert_uses_fresh_camera_counter_and_actual_angle_reque
     assert controller._ascent_lkas_alert(CC, CS) is None
 
 
-@pytest.mark.parametrize("platform", [CAR.SUBARU_ASCENT, CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_LEGACY_2025, CAR.SUBARU_CROSSTREK_2025])
+@pytest.mark.parametrize("platform", [CAR.SUBARU_ASCENT, CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_CROSSTREK_2025])
 def test_secondary_alert_controller_does_not_touch_other_subarus(platform):
   CP = CarInterface.get_non_essential_params(platform)
   CP.flags |= SubaruFlags.ASCENT_LKAS_ALERT.value

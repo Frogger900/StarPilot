@@ -307,9 +307,14 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert)
     return None
 
   dat = bytearray(raw_dat)
-  if lateral_active and visual_alert != VisualAlert.steerRequired and dat[2:] == b"\x00\x01\x04\x00\x00\x00":
-    dat[3:5] = b"\x00\x00"
-    dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
+  if lateral_active and visual_alert != VisualAlert.steerRequired:
+    if dat[2:] == b"\x00\x01\x04\x00\x00\x00":
+      dat[3:5] = b"\x00\x00"
+      dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
+    elif dat[2] == 0x1b or dat[4] == 0x02:
+      dat[2] = 0x00
+      dat[4] = 0x00
+      dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
   return address, bytes(dat), CanBus.main
 
 
