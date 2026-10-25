@@ -3,10 +3,6 @@ from types import SimpleNamespace
 import pytest
 
 from opendbc.car.subaru.avh import AVH_REQUEST, AVH_STATUS, INPUTS, AvhStartup, avh_request, checksum
-from opendbc.car.subaru.carcontroller import CarController
-from opendbc.car.subaru.interface import CarInterface
-from opendbc.car.subaru.values import CAR, SubaruSafetyFlags
-from opendbc.car import Bus
 
 
 def sample(address, counter):
@@ -20,6 +16,8 @@ def sample(address, counter):
     data[3] = 4
   elif address == 0x174:
     data[2] = 8
+  elif address == 0x390:
+    data[2] = 0x94
   data[0] = checksum(address, data)
   return bytes(data)
 
@@ -95,21 +93,63 @@ def test_followup_aborts_permanently(reason):
 
 
 def test_only_legacy_has_avh_safety_permission():
+  from opendbc.car.subaru.interface import CarInterface
+  from opendbc.car.subaru.values import CAR, SubaruSafetyFlags
   for car in CAR:
     cp = CarInterface.get_non_essential_params(car)
     assert bool(cp.safetyConfigs[0].safetyParam & SubaruSafetyFlags.AVH_STARTUP) == (car == CAR.SUBARU_LEGACY_2025)
 
 
 def test_existing_required_messages_keep_alive_checks():
+  from opendbc.car import Bus
+  from opendbc.car.subaru.interface import CarInterface
+  from opendbc.car.subaru.values import CAR
   cp = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
   parser = CarInterface.CarState.get_can_parsers(cp)[Bus.alt]
   assert not parser.message_states[0x13A].ignore_alive
   assert not parser.message_states[0x174].ignore_alive
+  assert parser.message_states[0x390].ignore_alive
   assert parser.message_states[AVH_REQUEST].ignore_alive
   assert parser.message_states[AVH_STATUS].ignore_alive
 
 
+def test_remote_start_waits_for_dash_active():
+  policy = AvhStartup()
+  frames = {}
+  # Simulate 60 seconds of remote start standby (0x390 byte 2 = 0x14)
+  for tick in range(601):
+    now = 100 + tick / 10
+    for address in INPUTS:
+      if address != AVH_REQUEST or tick % 10 == 0:
+        counter = tick // 10 if address == AVH_REQUEST else tick
+        data = sample(address, counter)
+        if address == 0x390:
+          data = bytearray(data)
+          data[2] = 0x14
+          data[0] = checksum(0x390, data)
+          data = bytes(data)
+        frames[address] = (now, data)
+    sent = policy.update(now, frames, True, True, False)
+    assert sent == []
+    assert not policy.done
+
+  # Now driver arrives and dash becomes active (0x390 byte 2 = 0x94)
+  for tick in range(601, 702):
+    now = 100 + tick / 10
+    for address in INPUTS:
+      if address != AVH_REQUEST or tick % 10 == 0:
+        counter = tick // 10 if address == AVH_REQUEST else tick
+        frames[address] = (now, sample(address, counter))
+    sent = policy.update(now, frames, True, True, False)
+    if tick < 701:
+      assert sent == []
+  assert sent == [avh_request(frames[AVH_REQUEST][1], 1)]
+
+
 def test_controller_sends_only_when_opted_in():
+  from opendbc.car.subaru.carcontroller import CarController
+  from opendbc.car.subaru.interface import CarInterface
+  from opendbc.car.subaru.values import CAR
   cp = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
   controller = CarController({}, cp)
   cc = SimpleNamespace(enabled=False, latActive=False, longActive=False,
