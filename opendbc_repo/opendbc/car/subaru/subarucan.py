@@ -311,7 +311,7 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert)
     if dat[2:] == b"\x00\x01\x04\x00\x00\x00":
       dat[3:5] = b"\x00\x00"
       dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
-    elif dat[2] == 0x1b or dat[4] == 0x02:
+    elif dat[2] in (0x1b, 0x0c) or dat[4] in (0x02, 0x06):
       dat[2] = 0x00
       dat[4] = 0x00
       dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff

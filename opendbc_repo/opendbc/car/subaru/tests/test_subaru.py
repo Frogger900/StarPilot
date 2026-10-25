@@ -927,7 +927,7 @@ def test_ascent_secondary_alert_preserves_other_alerts_and_opaque_data(payload):
   assert subarucan.create_ascent_lkas_alert(bytes(raw), True, structs.CarControl.HUDControl.VisualAlert.none)[1] == raw
 
 
-@pytest.mark.parametrize("payload", ["1b0002000000", "000002000000"])
+@pytest.mark.parametrize("payload", ["1b0002000000", "000002000000", "0c0006000000", "000006000000"])
 def test_legacy_hud_double_yellow_is_filtered_during_active_lateral(payload):
   raw = bytearray(bytes.fromhex("0000" + payload))
   raw[0] = (0xc4 + 3 + sum(raw[1:])) & 0xff
