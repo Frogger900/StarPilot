@@ -1,11 +1,11 @@
 #pragma once
 
 // Legacy startup AVH only. Never transmit the 0x32B status message.
-static const unsigned int SUBARU_AVH_INPUTS[] = {0x6BBU, 0x32BU, 0x40U, 0x48U, 0x13AU, 0x174U, 0x390U};
-static uint8_t subaru_avh_data[7][8];
-static uint32_t subaru_avh_ts[7];
-static bool subaru_avh_seen[7];
-static bool subaru_avh_seq[7];
+static const unsigned int SUBARU_AVH_INPUTS[] = {0x6BBU, 0x32BU, 0x40U, 0x48U, 0x13AU, 0x174U};
+static uint8_t subaru_avh_data[6][8];
+static uint32_t subaru_avh_ts[6];
+static bool subaru_avh_seen[6];
+static bool subaru_avh_seq[6];
 static bool subaru_avh_enabled;
 static bool subaru_avh_done;
 static unsigned int subaru_avh_count;
@@ -24,7 +24,7 @@ static void subaru_avh_init(bool enabled) {
   subaru_avh_template_ts = 0U;
   subaru_avh_stable_since = 0U;
   subaru_avh_stable = false;
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 6; i++) {
     subaru_avh_seen[i] = false;
     subaru_avh_seq[i] = false;
     subaru_avh_ts[i] = 0U;
@@ -36,14 +36,13 @@ static void subaru_avh_init(bool enabled) {
 
 static bool subaru_avh_ready(uint32_t now) {
   bool ready = true;
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 6; i++) {
     ready &= subaru_avh_seen[i] && subaru_avh_seq[i] &&
              (safety_get_ts_elapsed(now, subaru_avh_ts[i]) <= ((i == 0) ? 1500000U : 300000U));
   }
   const unsigned int rpm = ((unsigned int)subaru_avh_data[2][2] | ((unsigned int)subaru_avh_data[2][3] << 8U)) & 0x1FFFU;
   ready &= (rpm >= 400U) && (subaru_avh_data[2][4] == 0U) && (subaru_avh_data[3][3] == 4U);
   ready &= (subaru_avh_data[5][2] & 8U) != 0U;
-  ready &= (subaru_avh_data[6][2] & 0x80U) != 0U;
   ready &= !vehicle_moving && !controls_allowed;
   return ready;
 }
@@ -51,7 +50,7 @@ static bool subaru_avh_ready(uint32_t now) {
 static void subaru_avh_rx(const CANPacket_t *msg) {
   if (subaru_avh_enabled && !subaru_avh_done && (msg->bus == 1U)) {
     const uint32_t now = microsecond_timer_get();
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 6; i++) {
       if (msg->addr == SUBARU_AVH_INPUTS[i]) {
         if ((GET_LEN(msg) != 8U) || (subaru_get_checksum(msg) != subaru_compute_checksum(msg))) {
           subaru_avh_done = true;
@@ -77,9 +76,6 @@ static void subaru_avh_rx(const CANPacket_t *msg) {
           }
         }
       }
-    }
-    if (!subaru_avh_seen[6] || ((subaru_avh_data[6][2] & 0x80U) == 0U)) {
-      subaru_avh_start = now;
     }
     if (controls_allowed || (safety_get_ts_elapsed(now, subaru_avh_start) > 30000000U)) {
       subaru_avh_done = true;
@@ -108,7 +104,7 @@ static bool subaru_avh_tx(const CANPacket_t *msg) {
   // Rejected generic RX frames may not reach our hook; invalidate their cached inputs too.
   for (int i = 0; i < current_safety_config.rx_checks_len; i++) {
     const RxCheck *check = &current_safety_config.rx_checks[i];
-    for (int j = 0; j < 7; j++) {
+    for (int j = 0; j < 6; j++) {
       if (((unsigned int)check->msg[check->status.index].addr == SUBARU_AVH_INPUTS[j]) && (check->msg[check->status.index].bus == 1U)) {
         allowed &= check->status.valid_checksum && (check->status.wrong_counters < MAX_WRONG_COUNTERS);
       }

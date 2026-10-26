@@ -2,7 +2,7 @@
 
 AVH_REQUEST = 0x6BB
 AVH_STATUS = 0x32B
-INPUTS = (AVH_REQUEST, AVH_STATUS, 0x40, 0x48, 0x13A, 0x174, 0x390)
+INPUTS = (AVH_REQUEST, AVH_STATUS, 0x40, 0x48, 0x13A, 0x174)
 
 
 def checksum(address, data):
@@ -65,13 +65,6 @@ class AvhStartup:
     fresh = all(a in self.frames and self.frames[a][2] and
                 0 <= now - self.frames[a][0] <= (1.5 if a == AVH_REQUEST else 0.3) for a in INPUTS)
     if not enabled or not can_valid or not fresh:
-      self.stable_since = None
-      if self.followup is not None:
-        self.done = True
-      return []
-    dash_active = bool(self.frames[0x390][1][2] & 0x80)
-    if not dash_active:
-      self.started = now
       self.stable_since = None
       if self.followup is not None:
         self.done = True

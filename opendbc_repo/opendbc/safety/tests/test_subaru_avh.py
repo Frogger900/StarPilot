@@ -62,8 +62,7 @@ def test_followup_timing(safety, delay):
 
 
 @pytest.mark.parametrize('address,offset,value', [(AVH_REQUEST, 2, 1), (AVH_STATUS, 5, 32),
-                                                (0x40, 4, 1), (0x48, 3, 3), (0x13A, 2, 1),
-                                                (0x390, 2, 0x14)])
+                                                (0x40, 4, 1), (0x48, 3, 3), (0x13A, 2, 1)])
 def test_abort_on_manual_ack_or_movement(safety, address, offset, value):
   assert safety.safety_tx_hook(packet(AVH_REQUEST, request()))
   safety.set_timer(10_050_000)
@@ -73,35 +72,6 @@ def test_abort_on_manual_ack_or_movement(safety, address, offset, value):
   assert safety.safety_rx_hook(packet(address, data))
   assert not safety.safety_tx_hook(packet(AVH_REQUEST, request(2)))
 
-
-def test_remote_start_standby_holds_window_in_safety():
-  s = libsafety_py.libsafety
-  s.set_timer(0)
-  assert s.set_safety_hooks(CarParams.SafetyModel.subaru, FLAGS) == 0
-  s.set_controls_allowed(False)
-  # Feed remote start standby (0x390 byte 2 = 0x14) for 60 seconds
-  for tick in range(601):
-    s.set_timer(tick * 100_000)
-    for address in INPUTS:
-      if address != AVH_REQUEST or tick % 10 == 0:
-        data = sample(address, tick // 10 if address == AVH_REQUEST else tick)
-        if address == 0x390:
-          data = bytearray(data)
-          data[2] = 0x14
-          data[0] = checksum(0x390, data)
-          data = bytes(data)
-        assert s.safety_rx_hook(packet(address, data))
-  assert not s.safety_tx_hook(packet(AVH_REQUEST, request()))
-
-  # Now driver arrives and dash becomes active (0x390 byte 2 = 0x94)
-  for tick in range(601, 711):
-    s.set_timer(tick * 100_000)
-    for address in INPUTS:
-      if address != AVH_REQUEST or tick % 10 == 0:
-        assert s.safety_rx_hook(packet(address, sample(address, tick // 10 if address == AVH_REQUEST else tick)))
-  s.set_timer(710 * 100_000 + 20_000)
-  req = avh_request(sample(AVH_REQUEST, 71), 1)[1]
-  assert s.safety_tx_hook(packet(AVH_REQUEST, req))
 
 
 def test_stale_template_and_status_tx_blocked(safety):
