@@ -442,6 +442,7 @@ class CarController(CarControllerBase):
             self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
             hud_control.leftLaneVisible, hud_control.rightLaneVisible,
             hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
+            ready=CC.latActive,
           ))
 
         if (self.CP.flags & SubaruFlags.SEND_INFOTAINMENT) and getattr(CS, "es_infotainment_msg", None) is not None:

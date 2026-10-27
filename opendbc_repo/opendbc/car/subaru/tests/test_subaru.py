@@ -817,6 +817,30 @@ def test_lkas_hud_active_bit_follows_lateral_state(enabled, expected):
   assert parser.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == expected
 
 
+@pytest.mark.parametrize(("enabled", "ready", "expected_active", "expected_dash", "expected_line"), [
+  (False, False, 0, 0, 0),
+  (True, False, 1, 2, 2),
+  (True, True, 1, 2, 2),
+  (False, True, 1, 1, 1),
+])
+def test_lkas_hud_dash_state_and_lines(enabled, ready, expected_active, expected_dash, expected_line):
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  packer = CANPacker(dbc)
+  parser = CANParser(dbc, [("ES_LKAS_State", 0)], CanBus.main)
+  stock_lkas_state = defaultdict(int, {"LKAS_ACTIVE": 1})
+
+  msg = subarucan.create_es_lkas_state(
+    packer, 0, stock_lkas_state, enabled, 0, True, False, False, False, CanBus.main, ready=ready,
+  )
+  parser.update([(1, [msg])])
+
+  assert parser.can_valid
+  assert parser.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == expected_active
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == expected_dash
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == expected_line
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+
 def test_outback_manual_steering_keeps_cooperative_angle_request():
   CP = CarInterface.get_non_essential_params(CAR.SUBARU_OUTBACK_2023)
   controller = CarController({}, CP)
