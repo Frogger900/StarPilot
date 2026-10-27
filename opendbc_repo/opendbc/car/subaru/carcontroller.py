@@ -56,6 +56,7 @@ class CarController(CarControllerBase):
     self.ascent_es_distance_counter_last = None
     self.es_distance_counter_last = None
     self.ascent_lkas_alert_counter_last = None
+    self.lat_active_seen = False
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -438,11 +439,22 @@ class CarController(CarControllerBase):
                                                           self.status_bus))
 
         if getattr(CS, "es_lkas_state_msg", None) is not None:
+          if CC.latActive:
+            self.lat_active_seen = True
+          elif not getattr(CS.out, "standstill", False) or getattr(CS.out, "gearShifter", None) != structs.CarState.GearShifter.drive:
+            self.lat_active_seen = False
+
+          lat_ready = CC.latActive or (
+            self.lat_active_seen and
+            getattr(CS.out, "standstill", False) and
+            getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive
+          )
+
           can_sends.append(subarucan.create_es_lkas_state(
             self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
             hud_control.leftLaneVisible, hud_control.rightLaneVisible,
             hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
-            ready=CC.latActive,
+            ready=lat_ready,
           ))
 
         if (self.CP.flags & SubaruFlags.SEND_INFOTAINMENT) and getattr(CS, "es_infotainment_msg", None) is not None:
