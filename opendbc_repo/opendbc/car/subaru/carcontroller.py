@@ -441,13 +441,13 @@ class CarController(CarControllerBase):
         if getattr(CS, "es_lkas_state_msg", None) is not None:
           if CC.latActive:
             self.lat_active_seen = True
-          elif not getattr(CS.out, "standstill", False) or getattr(CS.out, "gearShifter", None) != structs.CarState.GearShifter.drive:
+          elif getattr(CS.out, "gearShifter", None) != structs.CarState.GearShifter.drive or getattr(CS.out, "vEgoRaw", 0.0) > 3.0:
             self.lat_active_seen = False
 
           lat_ready = CC.latActive or (
             self.lat_active_seen and
-            getattr(CS.out, "standstill", False) and
-            getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive
+            getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive and
+            (getattr(CS.out, "standstill", False) or getattr(CS.out, "vEgoRaw", 0.0) < 3.0)
           )
 
           can_sends.append(subarucan.create_es_lkas_state(

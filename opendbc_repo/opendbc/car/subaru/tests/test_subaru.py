@@ -819,8 +819,8 @@ def test_lkas_hud_active_bit_follows_lateral_state(enabled, expected):
 
 @pytest.mark.parametrize(("enabled", "ready", "expected_active", "expected_dash", "expected_line"), [
   (False, False, 0, 0, 0),
-  (True, False, 1, 2, 2),
-  (True, True, 1, 2, 2),
+  (True, False, 1, 2, 1),
+  (True, True, 1, 2, 1),
   (False, True, 1, 1, 1),
 ])
 def test_lkas_hud_dash_state_and_lines(enabled, ready, expected_active, expected_dash, expected_line):
@@ -839,6 +839,80 @@ def test_lkas_hud_dash_state_and_lines(enabled, ready, expected_active, expected
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == expected_dash
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == expected_line
   assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+
+def test_lkas_hud_standstill_lat_ready_latching():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller = CarController({}, CP)
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  parser = CANParser(dbc, [("ES_LKAS_State", 0)], CanBus.main)
+
+  CC = SimpleNamespace(
+    enabled=True, latActive=True, longActive=False,
+    actuators=SimpleNamespace(steeringAngleDeg=0.0, accel=0.0),
+    hudControl=SimpleNamespace(
+      visualAlert=VisualAlert.none, leadVisible=False,
+      leftLaneVisible=True, rightLaneVisible=True,
+      leftLaneDepart=False, rightLaneDepart=False,
+    ),
+    cruiseControl=SimpleNamespace(cancel=False),
+  )
+  CS = SimpleNamespace(
+    out=SimpleNamespace(
+      vEgoRaw=15.0, steeringAngleDeg=0.0, steeringRateDeg=0.0,
+      gearShifter=structs.CarState.GearShifter.drive, standstill=False,
+      canValid=True,
+    ),
+    es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
+  )
+
+  # 1. Driving active: green wheel (Dash_State = 2), solid white lines (1)
+  can_sends = controller.update(CC, CS, 0)
+  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  assert len(es_lkas) == 1
+  parser.update([(1, es_lkas)])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+  assert controller.lat_active_seen is True
+
+  # 2. Slowing down to a stop (latActive dropped, speed < 3.0 m/s, standstill not yet True):
+  # lat_active_seen must NOT be cleared, wheel turns white (1), lines stay solid white (1)
+  CC.latActive = False
+  CS.out.vEgoRaw = 1.0
+  CS.out.standstill = False
+  controller.frame = 10
+  can_sends = controller.update(CC, CS, 100_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  assert len(es_lkas) == 1
+  parser.update([(2, es_lkas)])
+  assert controller.lat_active_seen is True
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+
+  # 3. Fully stopped at red light (standstill = True, vEgoRaw = 0.0):
+  # wheel and lines must stay illuminated in ready state (1)
+  CS.out.vEgoRaw = 0.0
+  CS.out.standstill = True
+  controller.frame = 20
+  can_sends = controller.update(CC, CS, 200_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  assert len(es_lkas) == 1
+  parser.update([(3, es_lkas)])
+  assert controller.lat_active_seen is True
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+
+  # 4. Shifted out of Drive into Park:
+  # lat_active_seen resets, dash state turns off (0), lines turn off (0)
+  CS.out.gearShifter = structs.CarState.GearShifter.park
+  controller.frame = 30
+  can_sends = controller.update(CC, CS, 300_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  assert len(es_lkas) == 1
+  parser.update([(4, es_lkas)])
+  assert controller.lat_active_seen is False
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
 
 
 def test_outback_manual_steering_keeps_cooperative_angle_request():

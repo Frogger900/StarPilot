@@ -137,14 +137,10 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
     elif right_lane_depart:
       values["LKAS_Alert"] = 11  # Right lane departure dash alert
 
-  if enabled:
-    values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines
-    values["LKAS_Dash_State"] = 2  # Green enabled indicator
-    line_visible = 2  # Green active lines
-  elif ready:
-    values["LKAS_ACTIVE"] = 1  # Keep screen active on override/standby
-    values["LKAS_Dash_State"] = 1  # White ready indicator
-    line_visible = 1  # White standby lines
+  if enabled or ready:
+    values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines / keep screen active
+    values["LKAS_Dash_State"] = 2 if enabled else 1  # 2: Green enabled, 1: White ready
+    line_visible = 1  # Solid white lines on Subaru Global Gen2 (value 2 renders as hollow black outlines)
   else:
     values["LKAS_ACTIVE"] = 0
     values["LKAS_Dash_State"] = 0  # LKAS Not enabled
