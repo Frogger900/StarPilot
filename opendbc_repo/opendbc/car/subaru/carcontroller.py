@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
@@ -439,20 +440,29 @@ class CarController(CarControllerBase):
                                                           self.status_bus))
 
         if getattr(CS, "es_lkas_state_msg", None) is not None:
+          in_drive = getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive
           if CC.latActive:
             self.lat_active_seen = True
-          elif getattr(CS.out, "gearShifter", None) != structs.CarState.GearShifter.drive or getattr(CS.out, "vEgoRaw", 0.0) > 3.0:
+          elif not in_drive or getattr(CS.out, "vEgoRaw", 0.0) > 3.0:
             self.lat_active_seen = False
 
-          lat_ready = CC.latActive or (
+          lat_ready = in_drive or CC.latActive or (
             self.lat_active_seen and
-            getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive and
             (getattr(CS.out, "standstill", False) or getattr(CS.out, "vEgoRaw", 0.0) < 3.0)
           )
 
+          # Cornering and blinker line suppression gates
+          steer_angle_deg = abs(getattr(CS.out, "steeringAngleDeg", 0.0))
+          steer_gate = steer_angle_deg >= 45.0
+          left_blinker = bool(getattr(CS.out, "leftBlinker", False))
+          right_blinker = bool(getattr(CS.out, "rightBlinker", False))
+
+          left_line = 0 if (steer_gate or left_blinker) else hud_control.leftLaneVisible
+          right_line = 0 if (steer_gate or right_blinker) else hud_control.rightLaneVisible
+
           can_sends.append(subarucan.create_es_lkas_state(
             self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
-            hud_control.leftLaneVisible, hud_control.rightLaneVisible,
+            left_line, right_line,
             hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
             ready=lat_ready,
           ))
@@ -481,10 +491,12 @@ class CarController(CarControllerBase):
       else:
         cancel_frame_ready = True
         if (self.CP.flags & SubaruFlags.GLOBAL_GEN2) or self.CP.carFingerprint == CAR.SUBARU_ASCENT_2023:
-          stock_counter = CS.es_distance_msg["COUNTER"]
-          cancel_frame_ready = stock_counter != self.es_distance_counter_last
-          self.es_distance_counter_last = stock_counter
-          self.ascent_es_distance_counter_last = stock_counter
+          es_distance_msg = getattr(CS, "es_distance_msg", None)
+          if es_distance_msg is not None:
+            stock_counter = es_distance_msg["COUNTER"]
+            cancel_frame_ready = stock_counter != self.es_distance_counter_last
+            self.es_distance_counter_last = stock_counter
+            self.ascent_es_distance_counter_last = stock_counter
         if pcm_cancel_cmd and cancel_frame_ready:
           if not (self.CP.flags & SubaruFlags.HYBRID):
             bus = CanBus.alt_for_cp(self.CP) if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else self.main_bus
@@ -519,7 +531,7 @@ class CarController(CarControllerBase):
         if self.frame % 2 == 0:
           can_sends.append(subarucan.create_es_static_2(self.packer))
 
-    new_actuators = actuators.as_builder()
+    new_actuators = actuators.as_builder() if hasattr(actuators, "as_builder") else copy.copy(actuators)
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
       new_actuators.steeringAngleDeg = self.apply_steer_last
     else:
