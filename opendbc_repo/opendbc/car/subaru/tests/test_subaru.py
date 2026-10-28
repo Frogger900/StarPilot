@@ -803,36 +803,45 @@ def test_lkas_hud_state_uses_angle_request_state():
   assert "create_es_lkas_state(self.packer, self.frame // 10, CS.es_lkas_state_msg, CC.enabled" not in update_source
 
 
-@pytest.mark.parametrize(("enabled", "expected"), ((False, 0), (True, 1)))
-def test_lkas_hud_active_bit_follows_lateral_state(enabled, expected):
+@pytest.mark.parametrize(("lkas_active", "expected"), ((False, 0), (True, 1)))
+def test_lkas_hud_active_bit(lkas_active, expected):
   dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
   packer = CANPacker(dbc)
   parser = CANParser(dbc, [("ES_LKAS_State", 0)], CanBus.main)
   stock_lkas_state = defaultdict(int, {"LKAS_ACTIVE": 1})
 
   msg = subarucan.create_es_lkas_state(
-    packer, 0, stock_lkas_state, enabled, 0, False, False, False, False, CanBus.main,
+    packer, 0, stock_lkas_state, False, 0, False, False, False, False, CanBus.main, lkas_active=lkas_active,
   )
   parser.update([(1, [msg])])
 
   assert parser.can_valid
   assert parser.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == expected
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Enable"] == expected
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Enable"] == expected
 
 
-@pytest.mark.parametrize(("enabled", "ready", "expected_active", "expected_dash", "expected_line"), [
-  (False, False, 0, 0, 0),
-  (True, False, 1, 2, 1),
-  (True, True, 1, 2, 1),
-  (False, True, 1, 1, 1),
+@pytest.mark.parametrize(("enabled", "ready", "lkas_active", "expected_active", "expected_dash", "expected_line"), [
+  # In Park on startup (lkas_active=True, ready=False, enabled=False): screen stays active, no wheel icon, faded inactive lines (0)
+  (False, False, True, 1, 0, 0),
+  # In Drive ready (lkas_active=True, ready=True, enabled=False): screen active, white wheel icon, solid white lines (1)
+  (False, True, True, 1, 1, 1),
+  # Steering active (lkas_active=True, ready=True, enabled=True): screen active, green wheel icon, solid white lines (1)
+  (True, True, True, 1, 2, 1),
+  # Steering active at standstill / not ready (lkas_active=True, ready=False, enabled=True): green wheel icon, solid white lines (1)
+  (True, False, True, 1, 2, 1),
+  # In Reverse / disabled (lkas_active=False): everything off
+  (False, False, False, 0, 0, 0),
+  (False, True, False, 0, 0, 0),
 ])
-def test_lkas_hud_dash_state_and_lines(enabled, ready, expected_active, expected_dash, expected_line):
+def test_lkas_hud_dash_state_and_lines(enabled, ready, lkas_active, expected_active, expected_dash, expected_line):
   dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
   packer = CANPacker(dbc)
   parser = CANParser(dbc, [("ES_LKAS_State", 0)], CanBus.main)
   stock_lkas_state = defaultdict(int, {"LKAS_ACTIVE": 1})
 
   msg = subarucan.create_es_lkas_state(
-    packer, 0, stock_lkas_state, enabled, 0, True, False, False, False, CanBus.main, ready=ready,
+    packer, 0, stock_lkas_state, enabled, 0, True, False, False, False, CanBus.main, ready=ready, lkas_active=lkas_active,
   )
   parser.update([(1, [msg])])
 
@@ -917,7 +926,7 @@ def test_lkas_hud_standstill_lat_ready_latching():
   CC.latActive = False
 
   # 4. Shifted out of Drive into Park:
-  # lat_active_seen resets, dash state turns off (0), lines turn off (0)
+  # lat_active_seen resets, dash state turns off (0), lines turn off (0), but LKAS_ACTIVE stays 1!
   CS.out.gearShifter = structs.CarState.GearShifter.park
   controller.frame = 40
   _, can_sends = controller.update(CC, CS, 400_000_000)
@@ -925,6 +934,23 @@ def test_lkas_hud_standstill_lat_ready_latching():
   assert len(es_lkas) == 1
   parser.update([(4, es_lkas)])
   assert controller.lat_active_seen is False
+  assert parser.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Enable"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Enable"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+
+  # 5. Shifted into Reverse:
+  # LKAS_ACTIVE turns off completely (0)
+  CS.out.gearShifter = structs.CarState.GearShifter.reverse
+  controller.frame = 50
+  _, can_sends = controller.update(CC, CS, 500_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
+  assert len(es_lkas) == 1
+  parser.update([(5, es_lkas)])
+  assert parser.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Enable"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Enable"] == 0
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
 

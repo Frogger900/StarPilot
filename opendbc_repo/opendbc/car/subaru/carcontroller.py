@@ -446,6 +446,7 @@ class CarController(CarControllerBase):
 
         if getattr(CS, "es_lkas_state_msg", None) is not None:
           in_drive = getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive
+          in_reverse = getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.reverse
           if CC.latActive:
             self.lat_active_seen = True
           elif not in_drive or getattr(CS.out, "vEgoRaw", 0.0) > 3.0:
@@ -470,6 +471,7 @@ class CarController(CarControllerBase):
             left_line, right_line,
             hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
             ready=lat_ready,
+            lkas_active=not in_reverse,
           ))
 
         if (self.CP.flags & SubaruFlags.SEND_INFOTAINMENT) and getattr(CS, "es_infotainment_msg", None) is not None:
