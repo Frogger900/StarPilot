@@ -817,6 +817,10 @@ class StarPilotVariables:
       "LaneCenteringE2EAuthority", cast=float, condition=toggle.lane_centering,
       default=1.0, min=0.0, max=1.0,
     )
+    toggle.lane_keep_assist = self.get_value("LaneKeepAssist", default=True)
+    toggle.lane_keep_mode = self.get_value("LaneKeepMode", cast=int, condition=toggle.lane_keep_assist, default=2, min=0, max=2)
+    toggle.lane_keep_sensitivity = self.get_value("LaneKeepSensitivity", cast=int, condition=toggle.lane_keep_assist, default=1, min=0, max=2)
+    toggle.lane_keep_min_speed = self.get_value("LaneKeepMinActivationSpeed", cast=float, condition=toggle.lane_keep_assist, default=25.0, min=15.0, max=45.0)
 
     advanced_longitudinal_tuning = toggle.openpilot_longitudinal and self.get_value("AdvancedLongitudinalTune")
     ev_vehicle = default_ev_tuning_enabled(CP)

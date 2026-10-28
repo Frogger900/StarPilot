@@ -17,6 +17,8 @@ from opendbc.car.subaru.values import CAR, DBC, FW_QUERY_CONFIG, SUBARU_ALT_VERS
   SubaruFlags, SubaruSafetyFlags
 from opendbc.car.structs import CarParams
 
+VisualAlert = structs.CarControl.HUDControl.VisualAlert
+
 
 def make_sng_controller(flags=0, prev_close_distance=4.0):
   controller = object.__new__(CarController)
@@ -867,8 +869,8 @@ def test_lkas_hud_standstill_lat_ready_latching():
   )
 
   # 1. Driving active: green wheel (Dash_State = 2), solid white lines (1)
-  can_sends = controller.update(CC, CS, 0)
-  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  _, can_sends = controller.update(CC, CS, 0)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
   parser.update([(1, es_lkas)])
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
@@ -881,8 +883,8 @@ def test_lkas_hud_standstill_lat_ready_latching():
   CS.out.vEgoRaw = 1.0
   CS.out.standstill = False
   controller.frame = 10
-  can_sends = controller.update(CC, CS, 100_000_000)
-  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  _, can_sends = controller.update(CC, CS, 100_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
   parser.update([(2, es_lkas)])
   assert controller.lat_active_seen is True
@@ -894,8 +896,8 @@ def test_lkas_hud_standstill_lat_ready_latching():
   CS.out.vEgoRaw = 0.0
   CS.out.standstill = True
   controller.frame = 20
-  can_sends = controller.update(CC, CS, 200_000_000)
-  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  _, can_sends = controller.update(CC, CS, 200_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
   parser.update([(3, es_lkas)])
   assert controller.lat_active_seen is True
@@ -906,13 +908,96 @@ def test_lkas_hud_standstill_lat_ready_latching():
   # lat_active_seen resets, dash state turns off (0), lines turn off (0)
   CS.out.gearShifter = structs.CarState.GearShifter.park
   controller.frame = 30
-  can_sends = controller.update(CC, CS, 300_000_000)
-  es_lkas = [msg for msg in can_sends if msg[0] == 0x122]
+  _, can_sends = controller.update(CC, CS, 300_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
   parser.update([(4, es_lkas)])
   assert controller.lat_active_seen is False
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+
+
+def test_lkas_hud_amber_lines():
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  packer = CANPacker(dbc)
+  parser = CANParser(dbc, [("ES_LKAS_State", 0)], CanBus.main)
+  stock_lkas_state = defaultdict(int, {"LKAS_ACTIVE": 1})
+
+  # Left line nudge active (value 3 = amber/yellow), right line solid white (1)
+  msg = subarucan.create_es_lkas_state(
+    packer, 0, stock_lkas_state, False, 0, 3, True, False, False, CanBus.main, ready=True,
+  )
+  parser.update([(1, [msg])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 3
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Enable"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Enable"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+
+  # Right line nudge active (value 3 = amber/yellow), left line off (0)
+  msg2 = subarucan.create_es_lkas_state(
+    packer, 1, stock_lkas_state, False, 0, False, 3, False, False, CanBus.main, ready=True,
+  )
+  parser.update([(2, [msg2])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 3
+
+
+def test_lkas_hud_cornering_and_blinker_gates():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller = CarController({}, CP)
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  parser = CANParser(dbc, [("ES_LKAS_State", 0)], CanBus.main)
+
+  CC = SimpleNamespace(
+    enabled=False, latActive=False, longActive=False,
+    actuators=SimpleNamespace(steeringAngleDeg=0.0, accel=0.0),
+    hudControl=SimpleNamespace(
+      visualAlert=VisualAlert.none, leadVisible=False,
+      leftLaneVisible=True, rightLaneVisible=True,
+      leftLaneDepart=False, rightLaneDepart=False,
+    ),
+    cruiseControl=SimpleNamespace(cancel=False),
+  )
+  CS = SimpleNamespace(
+    out=SimpleNamespace(
+      vEgoRaw=20.0, steeringAngleDeg=0.0, steeringRateDeg=0.0,
+      gearShifter=structs.CarState.GearShifter.drive, standstill=False,
+      leftBlinker=False, rightBlinker=False, canValid=True,
+    ),
+    es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
+  )
+
+  # 1. Straight driving: both lines visible (1)
+  _, sends = controller.update(CC, CS, 0)
+  parser.update([(1, [m for m in sends if m[0] in (0x122, 0x322)])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
+
+  # 2. Cornering gate: steering angle >= 45 deg suppresses both lines (0)
+  CS.out.steeringAngleDeg = 48.0
+  controller.frame = 10
+  _, sends = controller.update(CC, CS, 100_000_000)
+  parser.update([(2, [m for m in sends if m[0] in (0x122, 0x322)])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+  # 3. Straighten back: lines immediately restore to solid white (1)
+  CS.out.steeringAngleDeg = 10.0
+  controller.frame = 20
+  _, sends = controller.update(CC, CS, 200_000_000)
+  parser.update([(3, [m for m in sends if m[0] in (0x122, 0x322)])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
+
+  # 4. Left blinker active: left line suppressed (0), right line stays visible (1)
+  CS.out.leftBlinker = True
+  controller.frame = 30
+  _, sends = controller.update(CC, CS, 300_000_000)
+  parser.update([(4, [m for m in sends if m[0] in (0x122, 0x322)])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
+
 
 
 def test_outback_manual_steering_keeps_cooperative_angle_request():

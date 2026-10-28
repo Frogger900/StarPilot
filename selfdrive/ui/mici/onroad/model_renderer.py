@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.controls.lib.lane_centering import get_lane_centering_visual_direction
+from openpilot.selfdrive.controls.lib.lanekeep import get_lane_keep_visual_state
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.lib.starpilot_theme import get_param_color, get_theme_color, get_visual_color, is_stock_color_scheme, with_alpha
 from openpilot.selfdrive.ui.onroad.starpilot.rainbow_path import RainbowPath
@@ -23,6 +24,8 @@ MIN_DRAW_DISTANCE = 10.0
 MAX_DRAW_DISTANCE = 100.0
 STOCK_LANE_LINES_COLOR = rl.Color(255, 255, 255, 255)
 OCEAN_BLUE_LANE_LINES_COLOR = rl.Color(0, 176, 220, 255)
+LKA_AMBER_COLOR = rl.Color(255, 185, 0, 255)
+LKA_RED_COLOR = rl.Color(255, 35, 35, 255)
 DEFAULT_LANE_LINES_WIDTH = 4.0
 DEFAULT_PATH_WIDTH = 6.1
 DEFAULT_ROAD_EDGES_WIDTH = 2.0
@@ -432,25 +435,58 @@ class ModelRenderer(Widget):
 
     return color
 
+  def _lane_keep_visual_state(self):
+    toggles = ui_state.starpilot_toggles
+    sm = ui_state.sm
+    if (sm.recv_frame.get("modelV2", 0) < ui_state.started_frame or
+        sm.recv_frame.get("carState", 0) < ui_state.started_frame):
+      return False, False, False, 0.0, 0.30
+
+    car_state = sm["carState"]
+    lat_active = ui_state.status == UIStatus.ENGAGED or ui_state.always_on_lateral_active
+    return get_lane_keep_visual_state(
+      sm["modelV2"],
+      car_state.vEgo,
+      getattr(car_state, "steeringAngleDeg", 0.0),
+      getattr(car_state, "steeringTorque", 0.0),
+      bool(getattr(car_state, "leftBlinker", False)),
+      bool(getattr(car_state, "rightBlinker", False)),
+      lat_active,
+      toggles,
+    )
+
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
     """Two closest lines should be green (lane line or road edges)"""
     stock_scheme, edge_color, lane_color, lane_centering_direction = self._lane_line_palette()
+    lka_left, lka_right, lka_red, lka_opacity, _ = self._lane_keep_visual_state()
+
     for i, lane_line in enumerate(self._lane_lines):
       if lane_line.projected_points.size == 0:
         continue
 
-      color = self._get_ll_color(float(self._lane_line_probs[i]), i in (1, 2), i in (0, 1),
-                                 stock_scheme, edge_color, lane_color, lane_centering_direction)
+      is_lka_nudge = (i == 1 and lka_left) or (i == 2 and lka_right)
+      if is_lka_nudge:
+        line_color = LKA_RED_COLOR if lka_red else LKA_AMBER_COLOR
+        alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
+        color = with_alpha(line_color, int(max(alpha, lka_opacity) * 255))
+      else:
+        color = self._get_ll_color(float(self._lane_line_probs[i]), i in (1, 2), i in (0, 1),
+                                   stock_scheme, edge_color, lane_color, lane_centering_direction)
       draw_polygon(self._rect, lane_line.projected_points, color)
 
     for i, road_edge in enumerate(self._road_edges):
       if road_edge.projected_points.size == 0:
         continue
 
-      # if closest lane lines are not confident, make road edges green
-      color = self._get_ll_color(float(1.0 - self._road_edge_stds[i]), float(self._lane_line_probs[i + 1]) < 0.25, i == 0,
-                                 stock_scheme, edge_color, lane_color)
+      is_edge_nudge = (i == 0 and lka_left and lka_red) or (i == 1 and lka_right and lka_red)
+      if is_edge_nudge:
+        alpha = np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0)
+        color = rl.Color(255, 35, 35, int(max(alpha, lka_opacity) * 255))
+      else:
+        # if closest lane lines are not confident, make road edges green
+        color = self._get_ll_color(float(1.0 - self._road_edge_stds[i]), float(self._lane_line_probs[i + 1]) < 0.25, i == 0,
+                                   stock_scheme, edge_color, lane_color)
       draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_path(self, sm):

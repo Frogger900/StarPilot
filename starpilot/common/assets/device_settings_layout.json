@@ -500,6 +500,73 @@
         "precision": 1,
         "parent_key": "VASMEnabled",
         "settings_tier": "advanced"
+      },
+      {
+        "key": "LaneKeepAssist",
+        "label": "Lane Keep Assist (LKA / RDM)",
+        "description": "Gentle passive boundary nudges and road departure mitigation when drifting toward lines without active centering.",
+        "picker_description": "Boundary nudges when drifting out of lane.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "is_parent_toggle": true,
+        "settings_tier": "simple"
+      },
+      {
+        "key": "LaneKeepMode",
+        "label": "Assistance Mode",
+        "description": "Select whether to assist on painted lane lines and road edges, or road edges only.",
+        "picker_description": "Selects which boundaries trigger nudges.",
+        "data_type": "int",
+        "ui_type": "dropdown",
+        "options": [
+          {
+            "value": 1,
+            "label": "Road Edge Only"
+          },
+          {
+            "value": 2,
+            "label": "Lane Lines & Road Edge"
+          }
+        ],
+        "parent_key": "LaneKeepAssist",
+        "settings_tier": "simple"
+      },
+      {
+        "key": "LaneKeepSensitivity",
+        "label": "Intervention Sensitivity",
+        "description": "Distance from tire outer edge to boundary before countersteering starts. Late: 0 in (at line), Normal: 8-10 in, Proactive: 14-16 in.",
+        "picker_description": "Distance before boundary countersteering begins.",
+        "data_type": "int",
+        "ui_type": "dropdown",
+        "options": [
+          {
+            "value": 0,
+            "label": "Late (0 in margin)"
+          },
+          {
+            "value": 1,
+            "label": "Normal (8-10 in margin)"
+          },
+          {
+            "value": 2,
+            "label": "Proactive (14-16 in margin)"
+          }
+        ],
+        "parent_key": "LaneKeepAssist",
+        "settings_tier": "simple"
+      },
+      {
+        "key": "LaneKeepMinActivationSpeed",
+        "label": "Minimum Activation Speed",
+        "description": "Speed floor above which Lane Keep Assist arms (15-45 mph). Includes a 4 mph hysteresis buffer.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 15.0,
+        "max": 45.0,
+        "step": 1.0,
+        "precision": 0,
+        "parent_key": "LaneKeepAssist",
+        "settings_tier": "simple"
       }
     ]
   },
