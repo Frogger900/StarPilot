@@ -891,7 +891,7 @@ def test_lkas_hud_standstill_lat_ready_latching():
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
 
-  # 3. Fully stopped at red light (standstill = True, vEgoRaw = 0.0):
+  # 3. Fully stopped at red light (standstill = True, vEgoRaw = 0.0, latActive = False):
   # wheel and lines must stay illuminated in ready state (1)
   CS.out.vEgoRaw = 0.0
   CS.out.standstill = True
@@ -904,11 +904,23 @@ def test_lkas_hud_standstill_lat_ready_latching():
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
 
+  # 3b. Fully stopped at red light with steering active (latActive = True, e.g. MADS/AOL or openpilot):
+  # wheel must stay GREEN (Dash_State = 2)
+  CC.latActive = True
+  controller.frame = 30
+  _, can_sends = controller.update(CC, CS, 300_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
+  assert len(es_lkas) == 1
+  parser.update([(4, es_lkas)])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+  CC.latActive = False
+
   # 4. Shifted out of Drive into Park:
   # lat_active_seen resets, dash state turns off (0), lines turn off (0)
   CS.out.gearShifter = structs.CarState.GearShifter.park
-  controller.frame = 30
-  _, can_sends = controller.update(CC, CS, 300_000_000)
+  controller.frame = 40
+  _, can_sends = controller.update(CC, CS, 400_000_000)
   es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
   parser.update([(4, es_lkas)])

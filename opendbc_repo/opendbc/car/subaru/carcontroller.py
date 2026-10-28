@@ -327,6 +327,11 @@ class CarController(CarControllerBase):
 
   def _lkas_status_active(self, CC):
     if self.CP.carFingerprint in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_LEGACY_2025):
+      # Physical rack angle commands (0x124) are suppressed at standstill (0 mph) to prevent dry-steer faults,
+      # but the cluster icon (0x322) must stay GREEN (2) whenever steering is actively engaged (MADS/AOL or openpilot)
+      # and not overridden by the driver.
+      if CC.latActive and not self.driver_override and not self.angle_handoff_active:
+        return True
       return self.angle_lkas_active
     return CC.latActive
 
