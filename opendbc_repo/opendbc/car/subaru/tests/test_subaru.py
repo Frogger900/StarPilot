@@ -941,16 +941,16 @@ def test_lkas_hud_standstill_lat_ready_latching():
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
 
   # 5. Shifted into Reverse:
-  # LKAS_ACTIVE turns off completely (0)
+  # LKAS_ACTIVE stays 1 to prevent display flickering, but wheel icon is off (0) and lines are faded (0)
   CS.out.gearShifter = structs.CarState.GearShifter.reverse
   controller.frame = 50
   _, can_sends = controller.update(CC, CS, 500_000_000)
   es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
   parser.update([(5, es_lkas)])
-  assert parser.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == 0
-  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Enable"] == 0
-  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Enable"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Enable"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Enable"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
 
