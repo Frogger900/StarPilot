@@ -324,7 +324,7 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert,
     # Suppress all background EyeSight centering/toggle/hands-off alerts whenever Cruise Main is armed,
     # while preserving stock FCW (0x01, 0x02, 0x0e), native LDW (0x0b, 0x0c), and opaque status bits in dat[5:].
     if dat[2] in (0x19, 0x1b, 0x1c, 0x1e) or (
-      dat[2] == 0x00 and ((dat[3] in (0x01, 0x07) and dat[4] == 0x04) or dat[4] in (0x02, 0x30))
+      dat[2] == 0x00 and ((dat[3] in (0x01, 0x07) and dat[4] == 0x04) or (dat[3] == 0x00 and dat[4] in (0x02, 0x30)))
     ):
       if not (visual_alert == VisualAlert.steerRequired and dat[2:5] == b"\x00\x01\x04"):
         dat[2:5] = b"\x00\x00\x00"
@@ -337,9 +337,8 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert,
     if dat[2:] == b"\x00\x01\x04\x00\x00\x00":
       dat[3:5] = b"\x00\x00"
       changed = True
-    elif dat[2] in (0x1b, 0x0b, 0x0c) or dat[4] in (0x02, 0x05, 0x06):
-      dat[2] = 0x00
-      dat[4] = 0x00
+    elif dat[2] in (0x1b, 0x0b, 0x0c) or (dat[2] == 0x00 and dat[3] == 0x00 and dat[4] in (0x02, 0x05, 0x06)):
+      dat[2:5] = b"\x00\x00\x00"
       changed = True
 
   if changed:

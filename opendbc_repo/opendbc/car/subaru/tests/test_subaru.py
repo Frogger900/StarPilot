@@ -1284,12 +1284,81 @@ def test_angle_filter_speed_schedule():
   for speed, tau in ((0.0, 0.3), (5.0, 0.3), (7.5, 0.2), (10.0, 0.1), (15.0, 0.05), (20.0, 0.0), (25.0, 0.0)):
     CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
     controller = CarController({}, CP)
-    CC = structs.CarControl(latActive=True)
+    CC = structs.CarControl(enabled=True, latActive=True)
     CC.actuators.steeringAngleDeg = 0.1
     CS = SimpleNamespace(out=structs.CarState(vEgo=speed, vEgoRaw=speed, gearShifter="drive"))
     actuators, _ = controller.update(CC.as_reader(), CS, 0)
     expected_alpha = 0.01 / (tau + 0.01)
     assert controller.angle_filter.x == pytest.approx(0.1 * expected_alpha)
+
+
+def test_legacy_2025_mads_launch_from_standstill_syncs_angle_filter_without_twitch():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller = CarController({}, CP)
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  angle_parser = CANParser(dbc, [("ES_LKAS_ANGLE", 0)], controller.angle_bus)
+
+  CC = structs.CarControl(enabled=False, latActive=True)
+  CC.actuators.steeringAngleDeg = -8.0
+
+  # 1. Stopped at a red light for 1.0 s with wheel resting at +6.0 deg while model wants -8.0 deg
+  CS = SimpleNamespace(
+    out=structs.CarState(vEgo=0.0, vEgoRaw=0.0, standstill=True, gearShifter="drive", steeringAngleDeg=6.0),
+    es_lkas_state_msg=defaultdict(int),
+  )
+  for frame in range(100):
+    controller.update(CC.as_reader(), CS, frame * 10_000_000)
+  assert controller.angle_filter.x == pytest.approx(6.0)
+
+  # 2. Creeping from 0 -> 0.3 m/s (0.67 mph, below 1.0 mph MADS min speed) for 0.5 s with wheel at +5.0 deg
+  CS.out.standstill = False
+  CS.out.vEgo = 0.3
+  CS.out.vEgoRaw = 0.3
+  CS.out.steeringAngleDeg = 5.0
+  for frame in range(100, 150):
+    controller.update(CC.as_reader(), CS, frame * 10_000_000)
+  assert controller.angle_filter.x == pytest.approx(5.0)
+  assert not controller.angle_lkas_active
+
+  # 3. Crossing 1.0 mph (vEgoRaw = 0.6 m/s): first active steering frame starts smoothly from +5.0 deg
+  # via tau=0.3s filter (~0.42 deg step), NOT a 4.5 deg windup twitch!
+  CS.out.vEgo = 0.6
+  CS.out.vEgoRaw = 0.6
+  _, sends = controller.update(CC.as_reader(), CS, 150 * 10_000_000)
+  angle_msgs = [m for m in sends if m[0] == 0x124]
+  assert len(angle_msgs) == 1
+  angle_parser.update([(1, angle_msgs)])
+  assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
+  first_cmd = angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"]
+  assert 4.4 < first_cmd < 5.0
+
+
+def test_lka_nudge_bypasses_angle_filter_while_mads_retains_filter():
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+
+  # LKA nudge at low speed (5.0 m/s) bypasses angle_filter directly to actuators.steeringAngleDeg
+  lka_ctrl = CarController({}, CP)
+  CC = structs.CarControl(enabled=False, latActive=True)
+  CC.actuators.steeringAngleDeg = 2.0
+  CS_lka = SimpleNamespace(
+    lka_armed=True,
+    lka_nudge_active=True,
+    out=structs.CarState(vEgo=5.0, vEgoRaw=5.0, gearShifter="drive", steeringAngleDeg=0.0),
+    es_lkas_state_msg=defaultdict(int),
+  )
+  lka_ctrl.update(CC.as_reader(), CS_lka, 0)
+  assert lka_ctrl.angle_filter.x == pytest.approx(2.0)
+
+  # MADS centering at the same speed (5.0 m/s) retains tau=0.3s angle_filter smoothing
+  mads_ctrl = CarController({}, CP)
+  CS_mads = SimpleNamespace(
+    lka_armed=False,
+    lka_nudge_active=False,
+    out=structs.CarState(vEgo=5.0, vEgoRaw=5.0, gearShifter="drive", steeringAngleDeg=0.0),
+    es_lkas_state_msg=defaultdict(int),
+  )
+  mads_ctrl.update(CC.as_reader(), CS_mads, 0)
+  assert mads_ctrl.angle_filter.x == pytest.approx(2.0 * (0.01 / 0.31))
 
 
 def test_angle_filter_updates_between_steering_messages():
@@ -1573,11 +1642,19 @@ def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw
     assert out_dat[2:5] == bytes(3)
     assert out_dat[5] == 0x5a  # Preserves opaque byte 5!
 
-  # Stock FCW codes (010104, 0e0000) are preserved untouched on 0x3C4!
-  for fcw_hex in ("010104", "0e0000"):
+  # Stock FCW / obstacle codes (including any using dat[4] in 02/05/06/30) are preserved untouched on 0x3C4!
+  for fcw_hex in ("010104", "010002", "020106", "0e0000", "0e0005", "000602"):
     raw = make_3c4(5, fcw_hex, "120000")
     _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw, True, VisualAlert.none, armed=True)
     assert out_dat[2:5] == bytes.fromhex(fcw_hex)
+    assert out_dat[5] == 0x12
+
+  # Active lateral LKAS/LDW codes and trailing 00 00 02/05/06 windshield LEDs clear all 3 alert bytes
+  for lkas_hex in ("1b0102", "0b0105", "0c0106", "000002", "000005", "000006"):
+    raw = make_3c4(5, lkas_hex, "340000")
+    _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw, True, VisualAlert.none, armed=True)
+    assert out_dat[2:5] == bytes(3)
+    assert out_dat[5] == 0x34
 
   # openpilot VisualAlert.steerRequired injects 000104 when armed=True (e.g. LKA 8s hands-on warning)
   raw_idle = make_3c4(6, "000000", "220000")

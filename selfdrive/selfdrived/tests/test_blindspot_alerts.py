@@ -130,12 +130,16 @@ def test_disabled_starpilot_warnings_stay_filtered_without_blindspot_event():
   assert events.create_alerts(alert_types) == []
 
 
-def test_loud_blindspot_alert_without_lateral_muted_at_standstill():
+def test_loud_blindspot_alert_without_lateral_muted_only_at_standstill():
   CS_stopped = _car_state(left_blinker=True, left_blindspot=True, standstill=True, v_ego=0.0)
   assert not should_loud_blindspot_alert_without_lateral(CS_stopped, _sm(), _toggles(mute_standstill=True))
 
-  CS_slow = _car_state(left_blinker=True, left_blindspot=True, standstill=False, v_ego=5.0)
-  assert not should_loud_blindspot_alert_without_lateral(CS_slow, _sm(), _toggles(mute_standstill=True, min_speed=10.0))
+  CS_nearly_stopped = _car_state(left_blinker=True, left_blindspot=True, standstill=False, v_ego=0.3)
+  assert not should_loud_blindspot_alert_without_lateral(CS_nearly_stopped, _sm(), _toggles(mute_standstill=True))
+
+  # Low-speed city driving (5.0 m/s ~ 11 mph) must NOT be muted even when minimum_lane_change_speed is higher
+  CS_city = _car_state(left_blinker=True, left_blindspot=True, standstill=False, v_ego=5.0)
+  assert should_loud_blindspot_alert_without_lateral(CS_city, _sm(), _toggles(mute_standstill=True, min_speed=10.0))
 
   # When mute_at_standstill is False, stopped alert is allowed
   assert should_loud_blindspot_alert_without_lateral(CS_stopped, _sm(), _toggles(mute_standstill=False))

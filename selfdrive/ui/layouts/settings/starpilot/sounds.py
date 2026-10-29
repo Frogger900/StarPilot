@@ -334,7 +334,7 @@ class StarPilotSoundsLayout(_SettingsPage):
         "title": tr_noop("Mute at Stop"),
         "subtitle": "",
         "is_enabled": lambda: starpilot_state.car_state.hasBSM and self._params.get_bool("LoudBlindspotAlertWhenDisengaged"),
-        "disabled_label": tr_noop("Needs BSM")
+        "disabled_label": tr_noop("Needs Loud While Paused")
       },
       "SpeedLimitChangedAlert": {
         "title": tr_noop("Speed Limit"),
@@ -353,7 +353,7 @@ class StarPilotSoundsLayout(_SettingsPage):
       self._params.put_int(key, 101)
     self._params.put_int(self.COOLDOWN_KEY, 0)
     for key in self.CUSTOM_ALERTS_KEYS:
-      self._params.put_bool(key, False)
+      self._params.put_bool(key, key == "LoudBlindspotAlertMuteAtStandstill")
 
   @classmethod
   def _init_sound_player(cls):

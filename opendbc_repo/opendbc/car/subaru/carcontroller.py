@@ -400,14 +400,27 @@ class CarController(CarControllerBase):
     # *** steering ***
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
       # Filter at the control-loop rate, including frames without a steering CAN message.
-      v_ego = getattr(getattr(CS, "out", None), "vEgo", 0.0)
-      if CC.latActive and not self.angle_handoff_active and not self.driver_override:
+      v_ego = getattr(cs_out, "vEgo", 0.0)
+      v_ego_raw = getattr(cs_out, "vEgoRaw", v_ego)
+      steer_angle = getattr(cs_out, "steeringAngleDeg", actuators.steeringAngleDeg)
+      standstill = bool(getattr(cs_out, "standstill", False))
+      mads_only = bool(CC.latActive and not getattr(CC, "enabled", False))
+      if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+        mads_ready = v_ego_raw > _LEGACY_2025_MADS_MIN_SPEED and abs(steer_angle) <= (_LEGACY_2025_MADS_MAX_STEER_ANGLE + 10.0)
+      else:
+        mads_ready = v_ego_raw > _ANGLE_MADS_MIN_SPEED and abs(steer_angle) < _ANGLE_MADS_MAX_STEER_ANGLE
+      angle_rack_ready = bool(in_drive and not standstill and (not mads_only or mads_ready))
+
+      if not CC.latActive:
+        self.angle_filter.x = actuators.steeringAngleDeg
+      elif not angle_rack_ready or self.angle_handoff_active or self.driver_override:
+        self.angle_filter.x = steer_angle
+      elif self.lka_nudge_active:
+        # LaneKeepController already ramps curvature smoothly; avoid double-filtering LKA nudges.
+        self.angle_filter.x = actuators.steeringAngleDeg
+      else:
         self.angle_filter.update_alpha(float(np.interp(v_ego, [5.0, 10.0, 20.0], [0.3, 0.1, 0.0])))
         self.angle_filter.update(actuators.steeringAngleDeg)
-      elif self.angle_handoff_active or self.driver_override:
-        self.angle_filter.x = getattr(getattr(CS, "out", None), "steeringAngleDeg", actuators.steeringAngleDeg)
-      else:
-        self.angle_filter.x = actuators.steeringAngleDeg
 
     if (self.frame % self.p.STEER_STEP) == 0:
       if self.CP.flags & SubaruFlags.LKAS_ANGLE:
