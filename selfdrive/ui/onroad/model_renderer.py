@@ -421,6 +421,7 @@ class ModelRenderer(Widget):
       car_state.vEgo,
       getattr(car_state, "steeringAngleDeg", 0.0),
       getattr(car_state, "steeringTorque", 0.0),
+      bool(getattr(car_state, "steeringPressed", False)),
       bool(getattr(car_state, "leftBlinker", False)),
       bool(getattr(car_state, "rightBlinker", False)),
       lat_active,

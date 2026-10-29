@@ -3,7 +3,7 @@ import numpy as np
 from enum import IntEnum
 
 from openpilot.common.constants import CV
-from openpilot.common.realtime import DT_CTRL
+DT_CTRL = 0.01
 
 
 class LaneKeepMode(IntEnum):
@@ -94,9 +94,10 @@ class LaneKeepController:
     v_ego: float,
     steering_angle_deg: float,
     steering_torque: float,
-    left_blinker: bool,
-    right_blinker: bool,
-    lat_active: bool,
+    left_blinker: bool = False,
+    right_blinker: bool = False,
+    lat_active: bool = False,
+    steering_pressed: bool = False,
     mode: int = LaneKeepMode.LANE_LINE_AND_ROAD_EDGE,
     sensitivity: int = LaneKeepSensitivity.NORMAL,
     min_activation_speed_mph: float = 25.0,
@@ -229,7 +230,9 @@ class LaneKeepController:
     )
 
     # 9. Driver Override & Lockout Evaluation
-    driver_override = abs(steering_torque) > OVERRIDE_TORQUE_THRESHOLD
+    # steering_pressed is openpilot's calibrated boolean from vehicle CAN (e.g. > 80-150 CAN torque units).
+    # If steering_pressed is not available or False, fallback to torque check if scaled.
+    driver_override = steering_pressed or (abs(steering_torque) > 120.0 if abs(steering_torque) > 5.0 else abs(steering_torque) > OVERRIDE_TORQUE_THRESHOLD)
 
     if self._lockout:
       # Clear lockout once driver applies torque or vehicle returns to center
@@ -337,15 +340,17 @@ class LaneKeepController:
 
 _ui_lka_controller = None
 
+def _get_toggle(toggles, key, default):
+  if isinstance(toggles, dict):
+    return toggles.get(key, default)
+  return getattr(toggles, key, default)
+
 def get_lane_keep_visual_state(
   model_v2,
   v_ego: float,
   steering_angle_deg: float,
   steering_torque: float,
-  left_blinker: bool,
-  right_blinker: bool,
-  lat_active: bool,
-  toggles: dict,
+  *args,
 ) -> tuple[bool, bool, bool, float, float]:
   """
   Returns (is_left_nudge, is_right_nudge, is_red, opacity, ribbon_width).
@@ -354,14 +359,22 @@ def get_lane_keep_visual_state(
   if _ui_lka_controller is None:
     _ui_lka_controller = LaneKeepController()
 
-  enabled = bool(toggles.get("lane_keep_assist", True))
+  if len(args) == 4:
+    left_blinker, right_blinker, lat_active, toggles = args
+    steering_pressed = False
+  elif len(args) >= 5:
+    steering_pressed, left_blinker, right_blinker, lat_active, toggles = args[:5]
+  else:
+    return False, False, False, 0.0, 0.30
+
+  enabled = bool(_get_toggle(toggles, "lane_keep_assist", True))
   if not enabled or lat_active:
     _ui_lka_controller.reset()
     return False, False, False, 0.0, 0.30
 
-  mode = int(toggles.get("lane_keep_mode", LaneKeepMode.LANE_LINE_AND_ROAD_EDGE))
-  sensitivity = int(toggles.get("lane_keep_sensitivity", LaneKeepSensitivity.NORMAL))
-  min_speed = float(toggles.get("lane_keep_min_speed", 25.0))
+  mode = int(_get_toggle(toggles, "lane_keep_mode", LaneKeepMode.LANE_LINE_AND_ROAD_EDGE))
+  sensitivity = int(_get_toggle(toggles, "lane_keep_sensitivity", LaneKeepSensitivity.NORMAL))
+  min_speed = float(_get_toggle(toggles, "lane_keep_min_speed", 25.0))
 
   _ui_lka_controller.update(
     model_v2=model_v2,
@@ -371,6 +384,7 @@ def get_lane_keep_visual_state(
     left_blinker=left_blinker,
     right_blinker=right_blinker,
     lat_active=lat_active,
+    steering_pressed=steering_pressed,
     mode=mode,
     sensitivity=sensitivity,
     min_activation_speed_mph=min_speed,

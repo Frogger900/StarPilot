@@ -58,6 +58,10 @@ class CarController(CarControllerBase):
     self.es_distance_counter_last = None
     self.ascent_lkas_alert_counter_last = None
     self.lat_active_seen = False
+    self.left_line_vis_debounced = False
+    self.right_line_vis_debounced = False
+    self.left_line_debounce_cnt = 0
+    self.right_line_debounce_cnt = 0
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -457,39 +461,69 @@ class CarController(CarControllerBase):
 
         if getattr(CS, "es_lkas_state_msg", None) is not None:
           in_drive = getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive
+          standstill = getattr(CS.out, "standstill", False) or getattr(CS.out, "vEgoRaw", 0.0) < _LEGACY_2025_MADS_MIN_SPEED
 
-          # MADS/AOL steering wheel icon on dash:
-          # Only shows once MADS/AOL is enabled:
-          # Green (Dash_State = 2): active centering (including at standstill)
-          # White (Dash_State = 1): driver is manually overriding
-          # Off (Dash_State = 0): MADS/AOL not enabled
+          if CC.latActive:
+            self.lat_active_seen = True
+          elif not in_drive:
+            self.lat_active_seen = False
+
+          # Steering wheel icon states on cluster (LKAS_Dash_State):
+          # 2 (Green): Active centering while moving
+          # 1 (White): Standstill in Drive with MADS armed, OR driver manual override while MADS active
+          # 0 (Off): MADS disengaged, or shifted out of Drive
           mads_override = CC.latActive and (self.driver_override or self.angle_handoff_active)
+          mads_standstill_ready = not CC.latActive and in_drive and standstill and self.lat_active_seen
+          wheel_ready = mads_override or mads_standstill_ready
+
+          # Line debouncing (max change once a second ~ 10 frames @ 10 Hz)
+          raw_left_vis = bool(hud_control.leftLaneVisible)
+          raw_right_vis = bool(hud_control.rightLaneVisible)
+
+          if raw_left_vis != self.left_line_vis_debounced:
+            self.left_line_debounce_cnt += 1
+            if self.left_line_debounce_cnt >= 10:
+              self.left_line_vis_debounced = raw_left_vis
+              self.left_line_debounce_cnt = 0
+          else:
+            self.left_line_debounce_cnt = 0
+
+          if raw_right_vis != self.right_line_vis_debounced:
+            self.right_line_debounce_cnt += 1
+            if self.right_line_debounce_cnt >= 10:
+              self.right_line_vis_debounced = raw_right_vis
+              self.right_line_debounce_cnt = 0
+          else:
+            self.right_line_debounce_cnt = 0
 
           # Cornering and blinker line suppression gates
           steer_angle_deg = abs(getattr(CS.out, "steeringAngleDeg", 0.0))
-          steer_gate = steer_angle_deg >= 45.0
+          # In MADS / Active Centering, do NOT cut out lines on wheel angle or speed;
+          # track all the way down to a complete stop as long as openpilot sees them.
+          # Cornering gate (> 45 deg) only suppresses lines in passive LKA standby.
+          steer_gate = (steer_angle_deg >= 45.0) if not CC.latActive else False
           left_blinker = bool(getattr(CS.out, "leftBlinker", False))
           right_blinker = bool(getattr(CS.out, "rightBlinker", False))
 
           if hud_control.leftLaneDepart:
-            left_line = 3  # Amber nudge line on cluster
+            left_line = 3  # Amber nudge line on cluster (immediate, no debounce)
           elif steer_gate or left_blinker:
             left_line = 0
           else:
-            left_line = 1 if hud_control.leftLaneVisible else 0
+            left_line = 1 if self.left_line_vis_debounced else 0
 
           if hud_control.rightLaneDepart:
-            right_line = 3  # Amber nudge line on cluster
+            right_line = 3  # Amber nudge line on cluster (immediate, no debounce)
           elif steer_gate or right_blinker:
             right_line = 0
           else:
-            right_line = 1 if hud_control.rightLaneVisible else 0
+            right_line = 1 if self.right_line_vis_debounced else 0
 
           can_sends.append(subarucan.create_es_lkas_state(
             self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
             left_line, right_line,
             hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
-            ready=mads_override,
+            ready=wheel_ready,
             in_drive=in_drive,
           ))
 

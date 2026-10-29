@@ -241,7 +241,7 @@ class Car:
     if not aol_available:
       self.FPCP.alternativeExperience &= ~ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL
 
-    if self.starpilot_toggles.always_on_lateral and aol_available:
+    if (self.starpilot_toggles.always_on_lateral or getattr(self.starpilot_toggles, "lane_keep_assist", False)) and aol_available:
       self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL
       self.FPCP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL
     if getattr(self.starpilot_toggles, "remap_cancel_to_distance", False):

@@ -52,6 +52,7 @@ def main():
         left_blinker=cs.leftBlinker,
         right_blinker=cs.rightBlinker,
         lat_active=cc.latActive,
+        steering_pressed=getattr(cs, "steeringPressed", False),
         mode=lka_mode if lka_enabled else LaneKeepMode.OFF,
         sensitivity=lka_sensitivity,
         min_activation_speed_mph=lka_min_speed,
