@@ -583,6 +583,7 @@ class Controls:
         sensitivity=lka_sensitivity,
         min_activation_speed_mph=lka_min_speed,
         dt=DT_CTRL,
+        model_updated=bool(self.sm.updated['modelV2']),
       )
     else:
       self.lka.reset(full=not lka_armed_raw)
@@ -633,12 +634,14 @@ class Controls:
     if lka_actuating:
       self.lane_centering.reset()
       jerk_factor = 1.0
-      road_curv = float(model_v2.action.desiredCurvature)
+      # Anchor strictly to the driver's live steering curvature (ratcheted only in the
+      # corrective direction so manual recovery is never resisted) rather than jumping
+      # to modelV2.action.desiredCurvature (which commands full lane centering).
       if self.lka.desired_curvature >= 0.0:
-        base_curv = max(self.lka_anchor_curvature, road_curv)
+        self.lka_anchor_curvature = max(self.lka_anchor_curvature, self.curvature)
       else:
-        base_curv = min(self.lka_anchor_curvature, road_curv)
-      new_desired_curvature = base_curv + self.lka.desired_curvature
+        self.lka_anchor_curvature = min(self.lka_anchor_curvature, self.curvature)
+      new_desired_curvature = self.lka_anchor_curvature + self.lka.desired_curvature
     else:
       # Steering PID loop and lateral MPC
       # Reset desired curvature to current to avoid violating the limits on engage

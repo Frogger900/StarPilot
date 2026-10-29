@@ -161,10 +161,9 @@ class VehicleSettingsManagerView(PanelManagerView):
         on_click=lambda: self._controller._on_select("combo:cancel"),
       ))
 
-    if not cs.isSubaru:
-      rows.append(SettingRow("LKASButtonControl", "value", tr_noop("LKAS Button"),
-                   get_value=lambda: self._controller._get_action_name("LKASButtonControl"),
-                   on_click=lambda: self._controller._on_select("LKASButtonControl")))
+    rows.append(SettingRow("LKASButtonControl", "value", tr_noop("LKAS Button"),
+                 get_value=lambda: self._controller._get_action_name("LKASButtonControl"),
+                 on_click=lambda: self._controller._on_select("LKASButtonControl")))
 
     rows.append(SettingRow("MainCruiseButtonControl", "value", tr_noop("CC Main Button"),
                  get_value=lambda: self._controller._get_action_name("MainCruiseButtonControl"),
@@ -652,9 +651,15 @@ class StarPilotVehicleSettingsLayout(_SettingsPage):
     }
     return titles.get(key, key)
 
+  def _option_display_name(self, key: str, option_id: int, default_name: str) -> str:
+    if option_id == 9 and key == "LKASButtonControl" and self._params.get_bool("LaneKeepAssist"):
+      return tr("Toggle AOL / LKA")
+    return tr(default_name)
+
   def _get_action_name(self, key: str) -> str:
     idx = self._params.get_int(key)
-    return tr(ACTION_NAME_BY_ID.get(idx, ACTION_NAMES[0]))
+    default_name = ACTION_NAME_BY_ID.get(idx, ACTION_NAMES[0])
+    return self._option_display_name(key, idx, default_name)
 
 
   def _on_toggle(self, param_key: str):
@@ -818,11 +823,11 @@ class StarPilotVehicleSettingsLayout(_SettingsPage):
                  (cs.hasOpenpilotLongitudinal or not o.get("requires_longitudinal", False)) and
                  (developer_access or not o.get("requires_developer", False))]
 
-    option_labels = [tr(o["name"]) for o in options]
+    option_labels = [self._option_display_name(key, o["id"], o["name"]) for o in options]
     option_ids = [o["id"] for o in options]
 
     current_id = self._params.get_int(key)
-    current = next((tr(o["name"]) for o in options if o["id"] == current_id), option_labels[0])
+    current = next((self._option_display_name(key, o["id"], o["name"]) for o in options if o["id"] == current_id), option_labels[0])
 
     def on_select(res):
       if res == DialogResult.CONFIRM and dialog.selection in option_labels:

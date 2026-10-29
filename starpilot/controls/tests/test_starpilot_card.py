@@ -92,6 +92,7 @@ def make_toggles(**overrides):
     "pulse_and_glide_via_cancel_very_long": False,
     "pulse_and_glide_via_lkas": False,
     "lkas_allowed_for_aol": False,
+    "lkas_button_aol_toggle": True,
     "main_cruise_aol_toggle": False,
     "main_cruise_slc_adopt": False,
     "pause_lateral_via_lkas": False,
@@ -2164,3 +2165,76 @@ def test_driver_monitoring_policy_active_when_lka_armed():
   assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=False, lkaArmed=False))) is False
   assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=False, lkaArmed=True), alive=False)) is False
   assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=False, lkaArmed=True), valid=False)) is False
+
+
+def test_subaru_wheel_controls_cc_main_no_action_and_lkas_button_mapping(monkeypatch, tmp_path):
+  monkeypatch.setattr(spc, "Params", FakeParams)
+  monkeypatch.setattr(spc, "ERROR_LOGS_PATH", tmp_path)
+
+  cp = SimpleNamespace(brand="subaru", carFingerprint="SUBARU_LEGACY_2025", flags=0)
+  fp = SimpleNamespace(alternativeExperience=spc.ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL)
+  card = spc.StarPilotCard(cp, fp)
+  sm = make_sm()
+  out = SimpleNamespace(distancePressed=False)
+
+  # CC Main Button = No Action (main_cruise_aol_toggle=False), LKAS Button = Toggle AOL / LKA (lkas_button_aol_toggle=True)
+  toggles = make_toggles(
+    always_on_lateral=True,
+    always_on_lateral_main=True,
+    always_on_lateral_lkas=True,
+    lkas_allowed_for_aol=True,
+    lkas_button_aol_toggle=True,
+    main_cruise_aol_toggle=False,
+    lane_keep_assist=True,
+  )
+
+  # 1. Pressing Main Cruise ON arms remembered default (MADS/AOL) without flipping modes
+  ret = card.update(
+    make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.mainCruise, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is True
+  assert ret.lkaArmed is False
+
+  # 2. Pressing Lane Centering (LKAS) toggles to LKA-Only and persists preference
+  ret = card.update(
+    make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+  assert card.params.get_bool("LastLateralModeCentering") is False
+
+  # 3. Turning everything OFF mid-drive via Main Cruise, then pressing Main Cruise back ON restores LKA-Only!
+  ret = card.update(
+    make_car_state(available=False, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.mainCruise, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is False
+
+  ret = card.update(
+    make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.mainCruise, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+
+  # 4. If user remaps LKAS Button in Wheel Controls to Create Bookmark (lkas_button_aol_toggle=False),
+  # pressing LKAS creates a bookmark instead of toggling LKA <-> MADS
+  remapped_toggles = make_toggles(
+    always_on_lateral=True,
+    always_on_lateral_main=True,
+    always_on_lateral_lkas=False,
+    lkas_allowed_for_aol=True,
+    lkas_button_aol_toggle=False,
+    bookmark_via_lkas=True,
+    lane_keep_assist=True,
+  )
+  ret = card.update(
+    make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm, remapped_toggles,
+  )
+  assert ret.lkaArmed is True
+  assert ret.alwaysOnLateralEnabled is False
+  assert card.params_memory.get_int("WheelButtonBookmarkCounter") == 1

@@ -386,8 +386,12 @@ class StarPilotCard:
       else:
         if not bool(self.prev_cruise_available):
           self.centering_mode_selected = self.preferred_centering_mode
+        lkas_toggles_lateral_mode = bool(
+          getattr(starpilot_toggles, "lkas_button_aol_toggle", True) or
+          getattr(starpilot_toggles, "always_on_lateral_lkas", False)
+        )
         for be, be_type in zip(carState.buttonEvents, button_event_types, strict=False):
-          if be_type == ButtonType.lkas and be.pressed:
+          if be_type == ButtonType.lkas and be.pressed and lkas_toggles_lateral_mode:
             if hyundai_aol_needs_engagement:
               self.hyundai_aol_ready = True
             self.centering_mode_selected = not self.centering_mode_selected
@@ -396,6 +400,11 @@ class StarPilotCard:
           elif be_type == ButtonType.mainCruise and be.pressed:
             if starpilot_toggles.main_cruise_slc_adopt and starpilot_toggles.speed_limit_controller:
               self.params_memory.put_bool("SLCAdoptSpeedLimit", True)
+            else:
+              for slot_index in range(3):
+                if getattr(starpilot_toggles, f"favorite_{slot_index + 1}_via_main_cruise", False):
+                  toggle_favorite_slot(slot_index, self.params, self.params_memory)
+                  break
         self.always_on_lateral_allowed = bool(self.centering_mode_selected and self.always_on_lateral_set)
         self.pause_lateral = not self.centering_mode_selected
     elif button_aol_supported:

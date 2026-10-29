@@ -878,6 +878,7 @@ class StarPilotVariables:
 
     toggle.always_on_lateral = self.get_value("AlwaysOnLateral") and always_on_lateral_available(CP)
     lkas_button_assigned_to_aol = self.get_button_function("LKASButtonControl") == BUTTON_FUNCTIONS["AOL_TOGGLE"]
+    toggle.lkas_button_aol_toggle = bool(toggle.lkas_allowed_for_aol and lkas_button_assigned_to_aol)
     toggle.ford_lkas_aol_toggle = toggle.car_make == "ford" and lkas_button_assigned_to_aol
     toggle.always_on_lateral_lkas = (
       toggle.always_on_lateral and toggle.lkas_allowed_for_aol and lkas_button_assigned_to_aol and not toggle.ford_lkas_aol_toggle
@@ -895,6 +896,7 @@ class StarPilotVariables:
     main_cruise_button_control = self.get_button_function("MainCruiseButtonControl")
     toggle.main_cruise_aol_toggle = _main_cruise_aol_allowed(main_cruise_button_control)
     toggle.main_cruise_slc_adopt = main_cruise_button_control == BUTTON_FUNCTIONS["SLC_ADOPT"]
+    self.set_favorite_button_flags(toggle, "main_cruise", main_cruise_button_control)
 
     toggle.automatic_updates = self.get_value("AutomaticUpdates") and not BACKUP_PATH.is_file()
 
@@ -1218,7 +1220,10 @@ class StarPilotVariables:
     toggle.nav_lane_positioning_allowed = self.get_value("NavLanePositioningAllowed")
     toggle.use_turn_desires = self.get_value("TurnDesires", condition=lateral_tuning)
 
-    lkas_button_control = self.get_button_function("LKASButtonControl", condition=toggle.car_make != "subaru")
+    lkas_button_control = self.get_button_function(
+      "LKASButtonControl",
+      condition=(toggle.car_make != "subaru" or toggle.lkas_allowed_for_aol),
+    )
     toggle.experimental_mode_via_lkas = (
       toggle.experimental_mode_available and lkas_button_control == BUTTON_FUNCTIONS["EXPERIMENTAL_MODE"]
     )

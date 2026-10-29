@@ -1162,8 +1162,15 @@ def test_ascent_secondary_alert_preserves_other_alerts_and_opaque_data(payload):
   assert subarucan.create_ascent_lkas_alert(bytes(raw), True, structs.CarControl.HUDControl.VisualAlert.none)[1] == raw
 
 
-@pytest.mark.parametrize("payload", ["1b0002000000", "000002000000", "0c0006000000", "000006000000"])
-def test_legacy_hud_double_yellow_is_filtered_during_active_lateral(payload):
+@pytest.mark.parametrize("payload,filtered", [
+  ("1b0002000000", True),
+  ("000002000000", True),
+  ("0b0005000000", False),
+  ("0c0006000000", False),
+  ("000005000000", False),
+  ("000006000000", False),
+])
+def test_legacy_hud_lkas_off_filtered_while_ldw_preserved_during_active_lateral(payload, filtered):
   raw = bytearray(bytes.fromhex("0000" + payload))
   raw[0] = (0xc4 + 3 + sum(raw[1:])) & 0xff
   address, dat, bus = subarucan.create_ascent_lkas_alert(bytes(raw), True, structs.CarControl.HUDControl.VisualAlert.none)
@@ -1171,7 +1178,7 @@ def test_legacy_hud_double_yellow_is_filtered_during_active_lateral(payload):
   assert bus == CanBus.main
   assert dat[1] == raw[1]
   assert dat[0] == ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
-  assert dat[2:] == bytes(6)
+  assert dat[2:] == (bytes(6) if filtered else raw[2:])
 
 
 @pytest.mark.parametrize("raw", [b"", bytes(7), bytes(9), bytes.fromhex("0002000104000000")])
@@ -1506,9 +1513,9 @@ def test_legacy_2025_lka_countersteer_nudge():
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 3
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
 
-  # 3. Softer LKA driver torque override (135 > _LKA_OVERRIDE_TORQUE_HIGH=120, < MADS 200):
-  # Yields EPS angle request immediately after 3 confirm frames
-  CS.out.steeringTorque = 135.0
+  # 3. Softer LKA driver torque override (85 > _LKA_OVERRIDE_TORQUE_HIGH=70, < MADS 200):
+  # Yields EPS angle request immediately after confirm frames
+  CS.out.steeringTorque = 85.0
   for frame in range(32, 39, 2):
     controller.frame = frame
     _, can_sends = controller.update(CC, CS, frame * 10_000_000)
@@ -1591,8 +1598,8 @@ def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw
     assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == 0
     assert parser.vl["ES_LKAS_State"]["LKAS_Alert_Msg"] == 0
 
-  # 2. Stock FCW (1, 2) always passes through on 0x322; native LDW (11, 12) is silenced during
-  # silent LKA boundary nudges (left_line=3) and passes through when not actively nudging (left_line=1)
+  # 2. Stock FCW (1, 2) and native EyeSight LDW (11, 12) ALWAYS pass through on 0x322
+  # (across MADS/ACC centering, active LKA boundary nudges, and passive standby)
   for fcw_code in (1, 2):
     f = next_seq()
     stock = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": fcw_code})
@@ -1603,14 +1610,25 @@ def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw
     assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == fcw_code
 
   for ldw_code in (11, 12):
+    # Active MADS / ACC centering (enabled=True)
+    f = next_seq()
+    stock_mads = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": ldw_code})
+    msg_mads = subarucan.create_es_lkas_state(
+      packer, f, stock_mads, True, VisualAlert.none, 1, 1, False, False, CanBus.main,
+    )
+    parser.update([(f, [msg_mads])])
+    assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == ldw_code
+
+    # Active LKA boundary nudge (left_line=3)
     f = next_seq()
     stock_nudge = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": ldw_code})
     msg_nudge = subarucan.create_es_lkas_state(
       packer, f, stock_nudge, False, VisualAlert.none, 3, 1, True, False, CanBus.main, ready=True,
     )
     parser.update([(f, [msg_nudge])])
-    assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == 0
+    assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == ldw_code
 
+    # Passive LKA standby (enabled=False, left_line=1)
     f = next_seq()
     stock_passive = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": ldw_code})
     msg_passive = subarucan.create_es_lkas_state(
@@ -1649,12 +1667,24 @@ def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw
     assert out_dat[2:5] == bytes.fromhex(fcw_hex)
     assert out_dat[5] == 0x12
 
-  # Active lateral LKAS/LDW codes and trailing 00 00 02/05/06 windshield LEDs clear all 3 alert bytes
-  for lkas_hex in ("1b0102", "0b0105", "0c0106", "000002", "000005", "000006"):
-    raw = make_3c4(5, lkas_hex, "340000")
+  # Background EyeSight lane-centering off chime/LED (1b.. and 000002) are cleared,
+  # while native EyeSight LDW dash alerts & windshield LED flashes (0b.., 0c.., 000005, 000006) are preserved at all times!
+  for lkas_bg_hex in ("1b0102", "000002"):
+    raw = make_3c4(5, lkas_bg_hex, "340000")
     _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw, True, VisualAlert.none, armed=True)
     assert out_dat[2:5] == bytes(3)
     assert out_dat[5] == 0x34
+
+  for ldw_hex in ("0b0005", "0b0105", "0c0106", "000005", "000006"):
+    raw_active = make_3c4(5, ldw_hex, "340000")
+    _, out_active, _ = subarucan.create_ascent_lkas_alert(raw_active, True, VisualAlert.none, armed=True)
+    assert out_active[2:5] == bytes.fromhex(ldw_hex)
+    assert out_active[5] == 0x34
+
+    raw_standby = make_3c4(5, ldw_hex, "340000")
+    _, out_standby, _ = subarucan.create_ascent_lkas_alert(raw_standby, False, VisualAlert.none, armed=True)
+    assert out_standby[2:5] == bytes.fromhex(ldw_hex)
+    assert out_standby[5] == 0x34
 
   # openpilot VisualAlert.steerRequired injects 000104 when armed=True (e.g. LKA 8s hands-on warning)
   raw_idle = make_3c4(6, "000000", "220000")

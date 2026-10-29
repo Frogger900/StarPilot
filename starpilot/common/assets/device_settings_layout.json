@@ -4184,7 +4184,7 @@
       {
         "key": "LKASButtonControl",
         "label": "LKAS Button",
-        "description": "Action performed when the \"LKAS\" button is pressed.",
+        "description": "Action performed when the \"LKAS\" (or Lane Centering) button is pressed. When Lane Keep Assist is enabled, \"Toggle Always On Lateral / LKA\" switches between Always On Lateral (MADS) and Lane Keep Assist.",
         "data_type": "int",
         "ui_type": "dropdown",
         "options": [
@@ -4226,7 +4226,7 @@
           },
           {
             "value": 9,
-            "label": "Toggle Always On Lateral"
+            "label": "Toggle Always On Lateral / LKA"
           },
           {
             "value": 11,

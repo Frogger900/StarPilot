@@ -114,10 +114,7 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
   if values["LKAS_Alert_Msg"] in (1, 7):
     values["LKAS_Alert_Msg"] = 0
 
-  # Suppress stock LDW beeps while openpilot centering or silent LKA boundary nudge owns lateral
-  if (enabled or left_line == 3 or right_line == 3) and values["LKAS_Alert"] in (11, 12):
-    values["LKAS_Alert"] = 0
-
+  # Preserve stock EyeSight Lane Departure Warnings (11, 12) at all times.
   # Show Keep hands on wheel alert for openpilot steerRequired alert
   if visual_alert == VisualAlert.steerRequired:
     values["LKAS_Alert_Msg"] = 1
@@ -329,7 +326,7 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert,
       if not (visual_alert == VisualAlert.steerRequired and dat[2:5] == b"\x00\x01\x04"):
         dat[2:5] = b"\x00\x00\x00"
         changed = True
-    if visual_alert == VisualAlert.steerRequired and dat[2] == 0x00 and dat[3:5] != b"\x01\x04":
+    if visual_alert == VisualAlert.steerRequired and dat[2:5] == b"\x00\x00\x00":
       dat[3:5] = b"\x01\x04"
       changed = True
 
@@ -337,7 +334,8 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert,
     if dat[2:] == b"\x00\x01\x04\x00\x00\x00":
       dat[3:5] = b"\x00\x00"
       changed = True
-    elif dat[2] in (0x1b, 0x0b, 0x0c) or (dat[2] == 0x00 and dat[3] == 0x00 and dat[4] in (0x02, 0x05, 0x06)):
+    elif dat[2] == 0x1b or (dat[2] == 0x00 and dat[3] == 0x00 and dat[4] == 0x02):
+      # Suppress stock lane-centering toggle chime/LED while preserving native LDW (0x0b, 0x0c, 000005, 000006)
       dat[2:5] = b"\x00\x00\x00"
       changed = True
 

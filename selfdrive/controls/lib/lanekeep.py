@@ -28,15 +28,24 @@ DEFAULT_VEHICLE_HALF_WIDTH = 0.92  # meters (centerline to outer edge of tire)
 DEFAULT_CAMERA_OFFSET = 0.04       # meters
 
 # Dynamics and Acceleration Limits
-MAX_LAT_ACCEL = 1.1                # m/s^2 gentle acceleration ceiling
-MAX_STEER_RATE_SCALE = 1.3         # +30% authority for emergency road edge mitigation
+MAX_LAT_ACCEL = 0.60               # m/s^2 gentle boundary nudge ceiling
+MAX_STEER_RATE_SCALE = 1.35        # +35% authority for emergency road edge mitigation
 OVERRIDE_TORQUE_THRESHOLD = 0.5    # Nm (light hand pressure yields assist)
+OVERRIDE_CAN_TORQUE_THRESHOLD = 70.0  # Raw CAN torque units (softer than MADS so light hand steering yields LKA)
 CORNERING_GATE_ANGLE_DEG = 45.0    # degrees (suppress assist during active turns)
 APEX_CUT_BUFFER_M = 0.25           # meters (reduce trigger margin on inside curve apex)
 POST_BLINKER_COOLDOWN_S = 2.0      # seconds to wait after turn signal auto-cancels
 
-# S-Curve Smoothing Filter (100ms time constant)
-TAU_SMOOTH = 0.10
+# S-Curve & 20 Hz Vision Velocity Smoothing Filters
+TAU_SMOOTH = 0.15
+TAU_OVERRIDE_RELEASE = 0.04
+TAU_VEL = 0.15
+MAX_D_DOT_MPS = 1.5
+TTC_LINE_PROXIMITY_M = 0.22
+TTC_EDGE_PROXIMITY_M = 0.30
+TTC_CONFIRM_TIME_S = 0.08
+NUDGE_RELEASE_HYSTERESIS_M = 0.04
+ACTIVE_CURVATURE_EPS = 1.2e-4
 
 
 class LaneKeepController:
@@ -64,6 +73,16 @@ class LaneKeepController:
     self._prev_d_right = None
     self._prev_d_edge_left = None
     self._prev_d_edge_right = None
+    self._d_dot_left = 0.0
+    self._d_dot_right = 0.0
+    self._d_dot_edge_left = 0.0
+    self._d_dot_edge_right = 0.0
+    self._dt_since_model = 0.0
+    self._ttc_left_timer = 0.0
+    self._ttc_right_timer = 0.0
+    self._ttc_edge_left_timer = 0.0
+    self._ttc_edge_right_timer = 0.0
+    self._nudge_side = None
     self._prev_v_ego = 0.0
     self._intervention_timer = 0.0
     self._rdm_timer = 0.0
@@ -87,6 +106,16 @@ class LaneKeepController:
     self._prev_d_right = None
     self._prev_d_edge_left = None
     self._prev_d_edge_right = None
+    self._d_dot_left = 0.0
+    self._d_dot_right = 0.0
+    self._d_dot_edge_left = 0.0
+    self._d_dot_edge_right = 0.0
+    self._dt_since_model = 0.0
+    self._ttc_left_timer = 0.0
+    self._ttc_right_timer = 0.0
+    self._ttc_edge_left_timer = 0.0
+    self._ttc_edge_right_timer = 0.0
+    self._nudge_side = None
     self._intervention_timer = 0.0
     self._rdm_timer = 0.0
     self._lockout = False
@@ -109,6 +138,7 @@ class LaneKeepController:
     sensitivity: int = LaneKeepSensitivity.NORMAL,
     min_activation_speed_mph: float = 25.0,
     dt: float = DT_CTRL,
+    model_updated: bool = True,
   ):
     """
     Core LKA / RDM cycle executed at controls rate (100 Hz / DT_CTRL).
@@ -158,19 +188,19 @@ class LaneKeepController:
     # 6. Sensitivity Trigger Thresholds
     if sensitivity == LaneKeepSensitivity.LATE:
       d_thresh = 0.00
-      ttc_thresh = 0.90
+      ttc_thresh = 0.85
       self.gradient_width = 0.15
     elif sensitivity == LaneKeepSensitivity.PROACTIVE:
-      d_thresh = 0.38
-      ttc_thresh = 1.60
+      d_thresh = 0.33
+      ttc_thresh = 1.40
       self.gradient_width = 0.45
     else:  # NORMAL (Default)
-      d_thresh = 0.22
-      ttc_thresh = 1.30
+      d_thresh = 0.20
+      ttc_thresh = 1.15
       self.gradient_width = 0.30
 
-    d_edge_thresh = 0.32
-    ttc_edge_thresh = 1.50
+    d_edge_thresh = 0.28
+    ttc_edge_thresh = 1.40
 
     # 7. Extract Vision Data
     left_prob = float(model_v2.laneLineProbs[1]) if len(model_v2.laneLineProbs) > 1 else 0.0
@@ -185,6 +215,8 @@ class LaneKeepController:
     edge_right_y = float(model_v2.roadEdges[1].y[0]) if len(model_v2.roadEdges) > 1 and len(model_v2.roadEdges[1].y) > 0 else 2.5
     edge_left_std = float(model_v2.roadEdgeStds[0]) if len(model_v2.roadEdgeStds) > 0 else 1.0
     edge_right_std = float(model_v2.roadEdgeStds[1]) if len(model_v2.roadEdgeStds) > 1 else 1.0
+    edge_left_valid = edge_left_std < 0.50
+    edge_right_valid = edge_right_std < 0.50
 
     # Distance to tire outer edges
     d_left = -left_y - (self.w_half + self.camera_offset)
@@ -192,26 +224,91 @@ class LaneKeepController:
     d_edge_left = -edge_left_y - (self.w_half + self.camera_offset)
     d_edge_right = edge_right_y - (self.w_half - self.camera_offset)
 
-    # Lateral velocities (d_dot < 0 means approaching boundary)
-    d_dot_left = (d_left - self._prev_d_left) / dt if self._prev_d_left is not None and dt > 0.0 else 0.0
-    d_dot_right = (d_right - self._prev_d_right) / dt if self._prev_d_right is not None and dt > 0.0 else 0.0
-    d_dot_edge_left = (d_edge_left - self._prev_d_edge_left) / dt if self._prev_d_edge_left is not None and dt > 0.0 else 0.0
-    d_dot_edge_right = (d_edge_right - self._prev_d_edge_right) / dt if self._prev_d_edge_right is not None and dt > 0.0 else 0.0
-    self._prev_d_left = d_left
-    self._prev_d_right = d_right
-    self._prev_d_edge_left = d_edge_left
-    self._prev_d_edge_right = d_edge_right
+    # Lateral velocities updated strictly on 20 Hz modelV2 frames with EMA filtering
+    # (prevents 5x derivative spikes from differentiating 20 Hz vision at 100 Hz DT_CTRL)
+    self._dt_since_model += max(0.0, dt)
+    if model_updated and self._dt_since_model > 0.0:
+      dt_m = max(self._dt_since_model, 1e-3)
+      self._dt_since_model = 0.0
+      alpha_v = float(dt_m / (TAU_VEL + dt_m))
+
+      if left_line_visible:
+        if self._prev_d_left is not None:
+          raw_dl = float(np.clip((d_left - self._prev_d_left) / dt_m, -MAX_D_DOT_MPS, MAX_D_DOT_MPS))
+          self._d_dot_left = (1.0 - alpha_v) * self._d_dot_left + alpha_v * raw_dl
+        self._prev_d_left = d_left
+      else:
+        self._prev_d_left = None
+        self._d_dot_left = 0.0
+
+      if right_line_visible:
+        if self._prev_d_right is not None:
+          raw_dr = float(np.clip((d_right - self._prev_d_right) / dt_m, -MAX_D_DOT_MPS, MAX_D_DOT_MPS))
+          self._d_dot_right = (1.0 - alpha_v) * self._d_dot_right + alpha_v * raw_dr
+        self._prev_d_right = d_right
+      else:
+        self._prev_d_right = None
+        self._d_dot_right = 0.0
+
+      if edge_left_valid:
+        if self._prev_d_edge_left is not None:
+          raw_el = float(np.clip((d_edge_left - self._prev_d_edge_left) / dt_m, -MAX_D_DOT_MPS, MAX_D_DOT_MPS))
+          self._d_dot_edge_left = (1.0 - alpha_v) * self._d_dot_edge_left + alpha_v * raw_el
+        self._prev_d_edge_left = d_edge_left
+      else:
+        self._prev_d_edge_left = None
+        self._d_dot_edge_left = 0.0
+
+      if edge_right_valid:
+        if self._prev_d_edge_right is not None:
+          raw_er = float(np.clip((d_edge_right - self._prev_d_edge_right) / dt_m, -MAX_D_DOT_MPS, MAX_D_DOT_MPS))
+          self._d_dot_edge_right = (1.0 - alpha_v) * self._d_dot_edge_right + alpha_v * raw_er
+        self._prev_d_edge_right = d_edge_right
+      else:
+        self._prev_d_edge_right = None
+        self._d_dot_edge_right = 0.0
+
+    d_dot_left = self._d_dot_left
+    d_dot_right = self._d_dot_right
+    d_dot_edge_left = self._d_dot_edge_left
+    d_dot_edge_right = self._d_dot_edge_right
 
     # Time-To-Cross (TTC) for painted lines and road edges
-    ttc_left = max(0.0, d_left) / abs(d_dot_left) if d_dot_left < -0.05 else 99.0
-    ttc_right = max(0.0, d_right) / abs(d_dot_right) if d_dot_right < -0.05 else 99.0
-    ttc_edge_left = max(0.0, d_edge_left) / abs(d_dot_edge_left) if d_dot_edge_left < -0.05 else 99.0
-    ttc_edge_right = max(0.0, d_edge_right) / abs(d_dot_edge_right) if d_dot_edge_right < -0.05 else 99.0
+    ttc_left = max(0.0, d_left) / abs(d_dot_left) if d_dot_left < -0.08 else 99.0
+    ttc_right = max(0.0, d_right) / abs(d_dot_right) if d_dot_right < -0.08 else 99.0
+    ttc_edge_left = max(0.0, d_edge_left) / abs(d_dot_edge_left) if d_dot_edge_left < -0.08 else 99.0
+    ttc_edge_right = max(0.0, d_edge_right) / abs(d_dot_edge_right) if d_dot_edge_right < -0.08 else 99.0
 
     # Curve Apex Allowance: reduce trigger margin on inside of curve (+road_curv = right curve, -road_curv = left curve)
     road_curv = float(model_v2.action.desiredCurvature) if hasattr(model_v2, "action") else 0.0
     d_thresh_left = max(0.0, d_thresh - (APEX_CUT_BUFFER_M if road_curv < -0.001 else 0.0))
     d_thresh_right = max(0.0, d_thresh - (APEX_CUT_BUFFER_M if road_curv > 0.001 else 0.0))
+
+    # Proximity-gated & debounced TTC triggers (prevents mid-lane and far road-edge false triggers)
+    if left_line_visible and d_left < (d_thresh_left + TTC_LINE_PROXIMITY_M) and ttc_left < ttc_thresh:
+      self._ttc_left_timer += dt
+    else:
+      self._ttc_left_timer = 0.0
+
+    if right_line_visible and d_right < (d_thresh_right + TTC_LINE_PROXIMITY_M) and ttc_right < ttc_thresh:
+      self._ttc_right_timer += dt
+    else:
+      self._ttc_right_timer = 0.0
+
+    if edge_left_valid and d_edge_left < (d_edge_thresh + TTC_EDGE_PROXIMITY_M) and ttc_edge_left < ttc_edge_thresh:
+      self._ttc_edge_left_timer += dt
+    else:
+      self._ttc_edge_left_timer = 0.0
+
+    if edge_right_valid and d_edge_right < (d_edge_thresh + TTC_EDGE_PROXIMITY_M) and ttc_edge_right < ttc_edge_thresh:
+      self._ttc_edge_right_timer += dt
+    else:
+      self._ttc_edge_right_timer = 0.0
+
+    left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_left <= 0.05) else 0.0
+    right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_right <= 0.05) else 0.0
+    edge_left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_edge_left <= 0.05) else 0.0
+    edge_right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_edge_right <= 0.05) else 0.0
 
     # 8. Trigger Detection (Left vs. Right)
     trigger_left_line = (
@@ -219,7 +316,7 @@ class LaneKeepController:
       left_line_visible and
       not steer_suppressed and
       self._blinker_cooldown_left <= 0.0 and
-      (d_left < d_thresh_left or ttc_left < ttc_thresh)
+      (d_left < (d_thresh_left + left_hyst) or self._ttc_left_timer >= TTC_CONFIRM_TIME_S)
     )
 
     trigger_right_line = (
@@ -227,36 +324,40 @@ class LaneKeepController:
       right_line_visible and
       not steer_suppressed and
       self._blinker_cooldown_right <= 0.0 and
-      (d_right < d_thresh_right or ttc_right < ttc_thresh)
+      (d_right < (d_thresh_right + right_hyst) or self._ttc_right_timer >= TTC_CONFIRM_TIME_S)
     )
 
     # Road Edge Mitigation (RDM) Fallback
     trigger_rdm_left = (
-      edge_left_std < 0.50 and
+      edge_left_valid and
       not steer_suppressed and
       self._blinker_cooldown_left <= 0.0 and
       (
-        d_edge_left < d_edge_thresh or
-        ttc_edge_left < ttc_edge_thresh or
-        (left_line_visible and d_left < 0.0 and d_edge_left < 0.50)
+        d_edge_left < (d_edge_thresh + edge_left_hyst) or
+        self._ttc_edge_left_timer >= TTC_CONFIRM_TIME_S or
+        (left_line_visible and d_left < 0.0 and d_edge_left < 0.45)
       )
     )
 
     trigger_rdm_right = (
-      edge_right_std < 0.50 and
+      edge_right_valid and
       not steer_suppressed and
       self._blinker_cooldown_right <= 0.0 and
       (
-        d_edge_right < d_edge_thresh or
-        ttc_edge_right < ttc_edge_thresh or
-        (right_line_visible and d_right < 0.0 and d_edge_right < 0.50)
+        d_edge_right < (d_edge_thresh + edge_right_hyst) or
+        self._ttc_edge_right_timer >= TTC_CONFIRM_TIME_S or
+        (right_line_visible and d_right < 0.0 and d_edge_right < 0.45)
       )
     )
 
     # 9. Driver Override & Lockout Evaluation
-    # steering_pressed is openpilot's calibrated boolean from vehicle CAN (e.g. > 80-150 CAN torque units).
-    # If steering_pressed is not available or False, fallback to torque check if scaled.
-    driver_override = steering_pressed or (abs(steering_torque) > 120.0 if abs(steering_torque) > 5.0 else abs(steering_torque) > OVERRIDE_TORQUE_THRESHOLD)
+    # steering_pressed is openpilot's calibrated boolean from vehicle CAN (e.g. > 80 CAN torque units on Subaru).
+    # Softer CAN threshold (70 units) ensures light intentional steering effortlessly yields LKA nudges.
+    driver_override = steering_pressed or (
+      abs(steering_torque) > OVERRIDE_CAN_TORQUE_THRESHOLD
+      if abs(steering_torque) > 5.0
+      else abs(steering_torque) > OVERRIDE_TORQUE_THRESHOLD
+    )
 
     if self._lockout:
       left_clear = (not left_line_visible or d_left > d_thresh_left + 0.15) and (edge_left_std >= 0.50 or d_edge_left > d_edge_thresh + 0.15)
@@ -273,16 +374,16 @@ class LaneKeepController:
     is_right_nudge = False
     rdm_active = False
 
-    # Proportional and Derivative spring gains (damping applies while approaching boundary)
-    kp = 0.0065
-    kd = 0.0030
+    # Gentle Proportional and Derivative spring gains (subtle boundary nudge, ~50% softer)
+    kp = 0.0034
+    kd = 0.0012
 
     if not driver_override:
       if trigger_rdm_left or trigger_left_line:
         is_left_nudge = True
         rdm_active = bool(trigger_rdm_left)
         if not self._lockout:
-          d_err = d_edge_thresh - d_edge_left if trigger_rdm_left else d_thresh_left - d_left
+          d_err = (d_edge_thresh + edge_left_hyst) - d_edge_left if trigger_rdm_left else (d_thresh_left + left_hyst) - d_left
           d_err = max(0.0, d_err)
           vel_left = max(0.0, -d_dot_edge_left) if trigger_rdm_left else max(0.0, -d_dot_left)
           # Positive curvature turns RIGHT away from left edge
@@ -291,11 +392,18 @@ class LaneKeepController:
         is_right_nudge = True
         rdm_active = bool(trigger_rdm_right)
         if not self._lockout:
-          d_err = d_edge_thresh - d_edge_right if trigger_rdm_right else d_thresh_right - d_right
+          d_err = (d_edge_thresh + edge_right_hyst) - d_edge_right if trigger_rdm_right else (d_thresh_right + right_hyst) - d_right
           d_err = max(0.0, d_err)
           vel_right = max(0.0, -d_dot_edge_right) if trigger_rdm_right else max(0.0, -d_dot_right)
           # Negative curvature turns LEFT away from right edge
           target_curvature = -float(kp * d_err + kd * vel_right)
+
+    if is_left_nudge:
+      self._nudge_side = "left"
+    elif is_right_nudge:
+      self._nudge_side = "right"
+    else:
+      self._nudge_side = None
 
     # Clamp lateral acceleration to ceiling (1.1 m/s^2 standard, 1.43 m/s^2 RDM)
     max_accel = MAX_LAT_ACCEL * (MAX_STEER_RATE_SCALE if rdm_active else 1.0)
@@ -334,9 +442,12 @@ class LaneKeepController:
       # Stage 1: Silent gentle nudge (0s - 8s)
       self.alert = LaneKeepAlert.NONE
 
-    # 12. S-Curve Envelope Smoothing Filter
-    alpha = float(dt / (TAU_SMOOTH + dt))
+    # 12. S-Curve Envelope Smoothing Filter (fast release on driver override, no sticky EPS servo tail)
+    tau = TAU_OVERRIDE_RELEASE if driver_override else TAU_SMOOTH
+    alpha = float(dt / (tau + dt))
     self.desired_curvature = (1.0 - alpha) * self._prev_curvature + alpha * target_curvature
+    if not nudge_active and abs(self.desired_curvature) <= ACTIVE_CURVATURE_EPS:
+      self.desired_curvature = 0.0
     self._prev_curvature = self.desired_curvature
     self.desired_lat_accel = float(self.desired_curvature * (v_ego * v_ego))
 
@@ -366,7 +477,7 @@ class LaneKeepController:
         self.right_line_state = 0
 
     # 14. UI Gradient State
-    self.active = abs(self.desired_curvature) > 1e-5
+    self.active = bool((nudge_active and abs(target_curvature) > 0.0) or abs(self.desired_curvature) > ACTIVE_CURVATURE_EPS)
     self.rdm_active = rdm_active
     self.is_red_gradient = rdm_active
 

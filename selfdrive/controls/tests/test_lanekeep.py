@@ -511,3 +511,55 @@ def test_extract_lane_keep_visual_state():
     lkaGradientWidth=0.45,
   )
   assert extract_lane_keep_visual_state(right_rdm) == (False, True, True, pytest.approx(0.95), pytest.approx(0.45))
+
+
+def test_20hz_vision_jitter_at_100hz_ctrl_never_false_triggers_mid_lane_or_far_road_edge():
+  """Regression test for route 00000102--9dbe33ca26:
+  100 Hz controls loop reading 20 Hz modelV2 with realistic 3-4 cm line jitter and 18 cm far road-edge
+  jitter while driving centered in the lane must produce ZERO false nudges or yellow line flashes.
+  """
+  lka = LaneKeepController()
+  v_ego = 38.0 * CV.MPH_TO_MS
+  rng = np.random.default_rng(42)
+
+  cur_model = _make_model(left_y=-1.58, right_y=1.68, edge_left_y=-2.35, edge_right_y=2.55, edge_right_std=0.30)
+  for step in range(500):  # 5.0 seconds at 100 Hz
+    model_updated = (step % 5) == 0
+    if model_updated:
+      cur_model = _make_model(
+        left_y=-1.58 + float(rng.uniform(-0.04, 0.04)),
+        right_y=1.68 + float(rng.uniform(-0.04, 0.04)),
+        edge_left_y=-2.35 + float(rng.uniform(-0.18, 0.18)),
+        edge_right_y=2.55 + float(rng.uniform(-0.18, 0.18)),
+        edge_left_std=0.28,
+        edge_right_std=0.32,
+      )
+    lka.update(
+      cur_model,
+      v_ego=v_ego,
+      steering_angle_deg=0.0,
+      steering_torque=25.0,
+      dt=0.01,
+      model_updated=model_updated,
+    )
+    assert not lka.active
+    assert lka.desired_curvature == 0.0
+    assert lka.left_line_state == 1
+    assert lka.right_line_state == 1
+
+
+def test_gentle_accel_ceiling_and_clean_release_without_sticky_tail():
+  lka = LaneKeepController()
+  v_ego = 45.0 * CV.MPH_TO_MS
+  deep_drift = _make_model(left_y=-0.95, right_y=2.6)
+  for _ in range(60):
+    lka.update(deep_drift, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01)
+  assert lka.active
+  # Standard LKA lateral acceleration must stay <= 0.60 m/s^2 (gentle nudge, ~45% softer than old 1.1 m/s^2)
+  assert abs(lka.desired_lat_accel) <= 0.605
+
+  # Light intentional CAN hand torque (80 > 70 threshold) releases active EPS actuation within 0.15s
+  for _ in range(15):
+    lka.update(deep_drift, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=80.0, dt=0.01)
+  assert not lka.active
+  assert lka.desired_curvature == 0.0
