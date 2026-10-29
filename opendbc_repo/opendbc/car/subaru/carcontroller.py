@@ -217,17 +217,28 @@ class CarController(CarControllerBase):
       apply_angle = CC.actuators.steeringAngleDeg
 
     if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+      hud_control = getattr(CC, "hudControl", None)
+      lka_left = getattr(hud_control, "leftLaneDepart", False)
+      lka_right = getattr(hud_control, "rightLaneDepart", False)
+      lka_nudge = not CC.latActive and (lka_left or lka_right) and \
+        CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
+
       mads_only = CC.latActive and not CC.enabled
       if mads_only:
         apply_angle = float(np.clip(apply_angle, -_LEGACY_2025_MADS_MAX_STEER_ANGLE, _LEGACY_2025_MADS_MAX_STEER_ANGLE))
 
       mads_only_ok = CS.out.vEgoRaw > _LEGACY_2025_MADS_MIN_SPEED and \
         abs(CS.out.steeringAngleDeg) <= (_LEGACY_2025_MADS_MAX_STEER_ANGLE + 10.0)
-      lkas_available = CC.latActive and (not mads_only or mads_only_ok) and \
+      lkas_available = (CC.latActive and (not mads_only or mads_only_ok) or lka_nudge) and \
         CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
 
       manual_handoff = self._angle_manual_handoff(CS, lkas_available)
       lkas_active = lkas_available and not manual_handoff
+
+      if lka_nudge and not manual_handoff:
+        # Gentle 1.5 deg countersteering nudge back toward lane center
+        nudge_offset = -1.5 if lka_left else 1.5
+        apply_angle = getattr(CS.out, "steeringAngleDeg", 0.0) + nudge_offset
 
       apply_steer = apply_std_steer_angle_limits(
         apply_angle,
@@ -330,9 +341,9 @@ class CarController(CarControllerBase):
       # Physical rack angle commands (0x124) are suppressed at standstill (0 mph) to prevent dry-steer faults,
       # but the cluster icon (0x322) must stay GREEN (2) whenever steering is actively engaged (MADS/AOL or openpilot)
       # and not overridden by the driver.
-      if CC.latActive and not self.driver_override and not self.angle_handoff_active:
-        return True
-      return self.angle_lkas_active
+      if not CC.latActive or self.driver_override or self.angle_handoff_active:
+        return False
+      return True
     return CC.latActive
 
   def _ascent_lkas_alert(self, CC, CS):
@@ -446,15 +457,13 @@ class CarController(CarControllerBase):
 
         if getattr(CS, "es_lkas_state_msg", None) is not None:
           in_drive = getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive
-          if CC.latActive:
-            self.lat_active_seen = True
-          elif not in_drive or getattr(CS.out, "vEgoRaw", 0.0) > 3.0:
-            self.lat_active_seen = False
 
-          lat_ready = in_drive or CC.latActive or (
-            self.lat_active_seen and
-            (getattr(CS.out, "standstill", False) or getattr(CS.out, "vEgoRaw", 0.0) < 3.0)
-          )
+          # MADS/AOL steering wheel icon on dash:
+          # Only shows once MADS/AOL is enabled:
+          # Green (Dash_State = 2): active centering (including at standstill)
+          # White (Dash_State = 1): driver is manually overriding
+          # Off (Dash_State = 0): MADS/AOL not enabled
+          mads_override = CC.latActive and (self.driver_override or self.angle_handoff_active)
 
           # Cornering and blinker line suppression gates
           steer_angle_deg = abs(getattr(CS.out, "steeringAngleDeg", 0.0))
@@ -462,14 +471,26 @@ class CarController(CarControllerBase):
           left_blinker = bool(getattr(CS.out, "leftBlinker", False))
           right_blinker = bool(getattr(CS.out, "rightBlinker", False))
 
-          left_line = 0 if (steer_gate or left_blinker) else hud_control.leftLaneVisible
-          right_line = 0 if (steer_gate or right_blinker) else hud_control.rightLaneVisible
+          if hud_control.leftLaneDepart:
+            left_line = 3  # Amber nudge line on cluster
+          elif steer_gate or left_blinker:
+            left_line = 0
+          else:
+            left_line = 1 if hud_control.leftLaneVisible else 0
+
+          if hud_control.rightLaneDepart:
+            right_line = 3  # Amber nudge line on cluster
+          elif steer_gate or right_blinker:
+            right_line = 0
+          else:
+            right_line = 1 if hud_control.rightLaneVisible else 0
 
           can_sends.append(subarucan.create_es_lkas_state(
             self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
             left_line, right_line,
             hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
-            ready=lat_ready,
+            ready=mads_override,
+            in_drive=in_drive,
           ))
 
         if (self.CP.flags & SubaruFlags.SEND_INFOTAINMENT) and getattr(CS, "es_infotainment_msg", None) is not None:

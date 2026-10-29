@@ -85,7 +85,7 @@ def create_cruise_buttons(packer, frame, cruise_buttons_msg, button, bus=CanBus.
 
 
 def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert, left_line, right_line, left_lane_depart, right_lane_depart,
-                         bus=CanBus.main, ready=False, lkas_active=True):
+                         bus=CanBus.main, ready=False, lkas_active=True, in_drive=True):
   values = {s: es_lkas_state_msg[s] for s in [
     "CHECKSUM",
     "LKAS_Alert_Msg",
@@ -144,10 +144,10 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
     if enabled:
       values["LKAS_Dash_State"] = 2  # 2: Green enabled / active steering
     elif ready:
-      values["LKAS_Dash_State"] = 1  # 1: White ready
+      values["LKAS_Dash_State"] = 1  # 1: White override
     else:
-      values["LKAS_Dash_State"] = 0  # 0: Inactive / Park / Neutral (no wheel icon)
-    line_visible = 1 if (ready or enabled) else 0
+      values["LKAS_Dash_State"] = 0  # 0: Inactive / no steering wheel icon
+    line_visible = 1 if in_drive else 0
   else:
     values["LKAS_ACTIVE"] = 0
     values["LKAS_Dash_State"] = 0  # LKAS Not enabled / Reverse
