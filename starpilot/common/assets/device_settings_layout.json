@@ -508,6 +508,7 @@
         "picker_description": "Boundary nudges when drifting out of lane.",
         "data_type": "bool",
         "ui_type": "toggle",
+        "default": true,
         "is_parent_toggle": true,
         "settings_tier": "simple"
       },
@@ -518,6 +519,7 @@
         "picker_description": "Selects which boundaries trigger nudges.",
         "data_type": "int",
         "ui_type": "dropdown",
+        "default": 2,
         "options": [
           {
             "value": 1,
@@ -538,6 +540,7 @@
         "picker_description": "Distance before boundary countersteering begins.",
         "data_type": "int",
         "ui_type": "dropdown",
+        "default": 1,
         "options": [
           {
             "value": 0,
@@ -561,6 +564,7 @@
         "description": "Speed floor above which Lane Keep Assist arms (15-45 mph). Includes a 4 mph hysteresis buffer.",
         "data_type": "float",
         "ui_type": "numeric",
+        "default": 25.0,
         "min": 15.0,
         "max": 45.0,
         "step": 1.0,
