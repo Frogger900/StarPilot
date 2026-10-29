@@ -110,6 +110,7 @@ struct StarPilotCarState @0xf35cc4560bbf6ec2 {
   accelHardCruise @28 :Bool;  # current/releasing accel cruise button came from GM hard-press signal
   decelHardCruise @29 :Bool;  # current/releasing decel cruise button came from GM hard-press signal
   pulseAndGlide @30 :Bool;  # developer-only wheel-button pulse-and-glide mode is enabled
+  lkaArmed @31 :Bool;  # passive Lane Keep Assist / RDM mode is armed (Cruise Main ON, LKA-Only selected)
 }
 
 struct StarPilotDeviceState @0xda96579883444c35 {
@@ -189,6 +190,8 @@ struct StarPilotOnroadEvent @0xe344718567f9ce71 {
     teslaCCDisengaged @38;
     teslaCCNotArmed @39;
     pedalNotCalibrated @40;
+    lkaKeepHandsOnWheel @41;
+    lkaEmergencyDeparture @42;
   }
 }
 
@@ -322,6 +325,14 @@ struct StarPilotLateralState @0xc2243c65e0340384 {
   frictionJerkDeadzone @5 :Float32;
   lowSpeedFactor @6 :Float32;
   unwindDetected @7 :Bool;
+  lkaArmed @8 :Bool;
+  lkaActive @9 :Bool;
+  lkaRdmActive @10 :Bool;
+  lkaLeftLineState @11 :UInt8;
+  lkaRightLineState @12 :UInt8;
+  lkaAlert @13 :UInt8;
+  lkaGradientOpacity @14 :Float32;
+  lkaGradientWidth @15 :Float32;
 }
 
 struct CustomReserved12 @0x9ccdc8676701b412 {

@@ -160,6 +160,11 @@ LaneChangeTime
 LaneChanges
 LaneDetectionWidth
 LaneLinesWidth
+LaneKeepAssist
+LaneKeepMinActivationSpeed
+LaneKeepMode
+LaneKeepSensitivity
+LastLateralModeCentering
 LanguageSetting
 LateralResumeDelay
 LateralTune

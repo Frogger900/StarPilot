@@ -62,6 +62,16 @@ class StarPilotCard:
     self.pressed_accel_buttons = set()
     self.always_on_lateral_allowed = False
     self.controller_aol_override = None
+    raw_pref = self.params.get("LastLateralModeCentering")
+    if raw_pref is None:
+      self.preferred_centering_mode = True
+    elif isinstance(raw_pref, bool):
+      self.preferred_centering_mode = raw_pref
+    elif isinstance(raw_pref, bytes):
+      self.preferred_centering_mode = raw_pref.strip() == b"1"
+    else:
+      self.preferred_centering_mode = str(raw_pref).strip() in ("1", "true", "True")
+    self.centering_mode_selected = False
     self.pacifica_aol_set_seen = False
     hyundai_flags = getattr(self.CP, "flags", 0)
     self.kia_forte_non_scc = (
@@ -202,6 +212,19 @@ class StarPilotCard:
       return False
     if self.hyundai_aol_needs_engagement:
       self.hyundai_aol_ready = True
+    orthogonal_lka_mode = bool(
+      getattr(starpilot_toggles, "lane_keep_assist", False) and
+      (self.CP.brand == "hyundai" or getattr(starpilot_toggles, "lkas_allowed_for_aol", False))
+    )
+    if orthogonal_lka_mode:
+      if not carState.cruiseState.available:
+        return False
+      self.centering_mode_selected = not self.centering_mode_selected
+      self.preferred_centering_mode = self.centering_mode_selected
+      self.params.put_bool_nonblocking("LastLateralModeCentering", self.preferred_centering_mode)
+      self.always_on_lateral_allowed = bool(self.centering_mode_selected and self.always_on_lateral_set)
+      self.pause_lateral = not self.centering_mode_selected
+      return True
     self.always_on_lateral_allowed = not self.always_on_lateral_allowed
     if main_cruise_aol:
       self.controller_aol_override = self.always_on_lateral_allowed
@@ -318,7 +341,15 @@ class StarPilotCard:
     )
     if getattr(self.CP, "carFingerprint", None) == HYUNDAI_CAR.HYUNDAI_SONATA_HYBRID:
       button_aol_supported = self.always_on_lateral_supported and bool(starpilot_toggles.lkas_allowed_for_aol)
-    button_managed_aol = starpilot_toggles.always_on_lateral_lkas or (button_aol_supported and starpilot_toggles.main_cruise_aol_toggle)
+    orthogonal_lka_mode = bool(
+      getattr(starpilot_toggles, "lane_keep_assist", False) and
+      (self.CP.brand == "hyundai" or starpilot_toggles.lkas_allowed_for_aol)
+    )
+    button_managed_aol = (
+      orthogonal_lka_mode or
+      starpilot_toggles.always_on_lateral_lkas or
+      (button_aol_supported and starpilot_toggles.main_cruise_aol_toggle)
+    )
     g70_main_cruise_aol_managed = (
       getattr(self.CP, "carFingerprint", None) == HYUNDAI_CAR.GENESIS_G70_2020
       and starpilot_toggles.main_cruise_aol_toggle
@@ -347,7 +378,27 @@ class StarPilotCard:
       elif sm["selfdriveState"].active or carState.cruiseState.enabled:
         self.hyundai_aol_ready = True
 
-    if button_aol_supported:
+    if orthogonal_lka_mode:
+      if not carState.cruiseState.available:
+        self.centering_mode_selected = False
+        self.always_on_lateral_allowed = False
+        self.pause_lateral = False
+      else:
+        if not bool(self.prev_cruise_available):
+          self.centering_mode_selected = self.preferred_centering_mode
+        for be, be_type in zip(carState.buttonEvents, button_event_types, strict=False):
+          if be_type == ButtonType.lkas and be.pressed:
+            if hyundai_aol_needs_engagement:
+              self.hyundai_aol_ready = True
+            self.centering_mode_selected = not self.centering_mode_selected
+            self.preferred_centering_mode = self.centering_mode_selected
+            self.params.put_bool_nonblocking("LastLateralModeCentering", self.preferred_centering_mode)
+          elif be_type == ButtonType.mainCruise and be.pressed:
+            if starpilot_toggles.main_cruise_slc_adopt and starpilot_toggles.speed_limit_controller:
+              self.params_memory.put_bool("SLCAdoptSpeedLimit", True)
+        self.always_on_lateral_allowed = bool(self.centering_mode_selected and self.always_on_lateral_set)
+        self.pause_lateral = not self.centering_mode_selected
+    elif button_aol_supported:
       for be, be_type in zip(carState.buttonEvents, button_event_types, strict=False):
         if be_type == ButtonType.lkas and be.pressed and starpilot_toggles.always_on_lateral_lkas:
           if hyundai_aol_needs_engagement:
@@ -412,7 +463,7 @@ class StarPilotCard:
     # On rising edge of engagement (SET press enabling lat+long), auto-enable AOL
     # so that lateral persists when braking disengages longitudinal
     engagement_started = sm["selfdriveState"].active and not self.prev_active
-    if (engagement_started and self.always_on_lateral_set and
+    if (not orthogonal_lka_mode and engagement_started and self.always_on_lateral_set and
         (starpilot_toggles.always_on_lateral_lkas or tesla_disengage_on_brake) and
         (not main_cruise_aol or self.controller_aol_override is not False)):
       if hyundai_aol_needs_engagement:
@@ -532,6 +583,8 @@ class StarPilotCard:
           self.handle_button_event("lkas", sm, starpilot_toggles)
 
     self._handle_controller_actions(carState, sm, starpilot_toggles, main_cruise_aol)
+    if orthogonal_lka_mode:
+      self.pause_lateral = bool(carState.cruiseState.available and not self.centering_mode_selected)
 
     if self.ev6_aol_needs_arming and not ev6_aol_authorized:
       self.always_on_lateral_allowed = False
@@ -592,6 +645,26 @@ class StarPilotCard:
     starpilotCarState.forceCoast = self.force_coast
     starpilotCarState.pulseAndGlide = self.pulse_and_glide
     starpilotCarState.isParked = carState.gearShifter == GearShifter.park
+    centering_active_or_mads = self.centering_mode_selected and (
+      self.always_on_lateral_set or bool(sm["selfdriveState"].active) or bool(carState.cruiseState.enabled)
+    )
+    lka_mode_selected = (
+      (not centering_active_or_mads) if orthogonal_lka_mode
+      else (not self.always_on_lateral_enabled and (not sm["selfdriveState"].active or self.pause_lateral))
+    )
+    lka_armed = (
+      bool(getattr(starpilot_toggles, "lane_keep_assist", False))
+      and lka_mode_selected
+      and bool(carState.cruiseState.available)
+      and carState.gearShifter not in NON_DRIVING_GEARS
+      and sm["liveCalibration"].calPerc >= 1
+      and not aol_blocked_by_immediate_disable(
+        sm["selfdriveState"].alertType, sm["starpilotSelfdriveState"].alertType,
+      )
+      and not self.error_log.is_file()
+    )
+
+    starpilotCarState.lkaArmed = lka_armed
     starpilotCarState.pauseLateral = self.pause_lateral
     starpilotCarState.pauseLongitudinal = self.pause_longitudinal
     starpilotCarState.trafficModeEnabled = self.traffic_mode_enabled

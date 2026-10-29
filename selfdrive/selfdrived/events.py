@@ -1277,6 +1277,22 @@ STARPILOT_EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.PERMANENT: EngagementAlert(AudibleAlert.disengage),
   },
 
+  StarPilotEventName.lkaKeepHandsOnWheel: {
+    ET.WARNING: Alert(
+      "Keep Hands on Steering Wheel",
+      "Lane Keep Assist Active",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.HIGH, VisualAlert.steerRequired, AudibleAlert.warningSoft, 1.),
+  },
+
+  StarPilotEventName.lkaEmergencyDeparture: {
+    ET.WARNING: Alert(
+      "TAKE CONTROL IMMEDIATELY",
+      "Road Departure Detected",
+      AlertStatus.critical, AlertSize.full,
+      Priority.HIGHEST, VisualAlert.ldw, AudibleAlert.warningImmediate, 2.),
+  },
+
   StarPilotEventName.pedalNotCalibrated: {
     ET.PERMANENT: NormalPermanentAlert("Pedal Not Calibrated", "Check Calibration"),
     ET.NO_ENTRY: NoEntryAlert("Pedal Not Calibrated: Check Calibration"),

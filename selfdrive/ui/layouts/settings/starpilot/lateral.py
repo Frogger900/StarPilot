@@ -33,6 +33,17 @@ PANEL_STYLE = DEFAULT_PANEL_STYLE
 _LATERAL_TUNE_KEYS = ["TurnDesires", "NNFF", "NNFFLite", "ForceTorqueController"]
 _ADVANCED_LATERAL_KEYS = ["ForceAutoTune", "ForceAutoTuneOff"]
 
+_LANE_KEEP_MODE_OPTIONS = [
+  (1, tr_noop("Road Edge Only")),
+  (2, tr_noop("Lane Lines & Road Edge")),
+]
+
+_LANE_KEEP_SENSITIVITY_OPTIONS = [
+  (0, tr_noop("Late (0 in margin)")),
+  (1, tr_noop("Normal (8-10 in margin)")),
+  (2, tr_noop("Proactive (14-16 in margin)")),
+]
+
 
 def _sync_parent(params, parent_key, child_keys):
   if any(params.get_bool(k) for k in child_keys):
@@ -44,12 +55,12 @@ def _sync_parent(params, parent_key, child_keys):
 
 
 # ═══════════════════════════════════════════════════════════════
-# SteeringManagerView — 3-card category hub
+# SteeringManagerView — 4-card category hub
 # ═══════════════════════════════════════════════════════════════
 
 class SteeringManagerView(CardHubManagerView):
   def __init__(self, controller, **kwargs):
-    super().__init__(controller, [], **kwargs)
+    super().__init__(controller, [], columns=2, **kwargs)
 
   def _build_cards(self):
     cards = [
@@ -58,6 +69,12 @@ class SteeringManagerView(CardHubManagerView):
         "desc": tr("Configure Always On Lateral (AOL), pause speed thresholds, and turn signal behaviors."),
         "icon": "steering",
         "on_click": lambda: self._controller._navigate_to("behavior"),
+      },
+      {
+        "title": tr("Lane Keep Assist"),
+        "desc": tr("Configure passive lane boundary nudges, road departure mitigation, sensitivity, and activation speed."),
+        "icon": "road",
+        "on_click": lambda: self._controller._navigate_to("lane_keep"),
       },
       {
         "title": tr("Lane Changes"),
@@ -102,6 +119,9 @@ class StarPilotLateralLayout(_SettingsPage):
 
     def aol_on():
       return p.get_bool("AlwaysOnLateral")
+
+    def lka_on():
+      return p.get_bool("LaneKeepAssist")
 
     def lc_on():
       return p.get_bool("LaneChanges")
@@ -158,7 +178,39 @@ class StarPilotLateralLayout(_SettingsPage):
       ),
     ]
 
-    # ── 2. Lane Changes ──
+    # ── 2. Lane Keep Assist ──
+    self._lane_keep_rows = [
+      SettingRow(
+        "LaneKeepMode", "value", tr_noop("Assistance Mode"),
+        subtitle=tr_noop("Assist on painted lane lines and road edges, or road edges only."),
+        get_value=self._get_lane_keep_mode_display,
+        on_click=lambda: self._show_labeled_select(
+          "Assistance Mode", "LaneKeepMode", _LANE_KEEP_MODE_OPTIONS, p.get_int("LaneKeepMode") or 2,
+        ),
+        visible=lka_on,
+      ),
+      SettingRow(
+        "LaneKeepSensitivity", "value", tr_noop("Intervention Sensitivity"),
+        subtitle=tr_noop("Distance from outer tire edge to boundary before countersteering starts."),
+        get_value=self._get_lane_keep_sensitivity_display,
+        on_click=lambda: self._show_labeled_select(
+          "Intervention Sensitivity", "LaneKeepSensitivity", _LANE_KEEP_SENSITIVITY_OPTIONS, p.get_int("LaneKeepSensitivity"),
+        ),
+        visible=lka_on,
+      ),
+      SettingRow(
+        "LaneKeepMinActivationSpeed", "value", tr_noop("Minimum Activation Speed"),
+        subtitle=tr_noop("Speed floor above which Lane Keep Assist arms (includes 4 mph hysteresis)."),
+        get_value=lambda: f"{int(round(p.get_float('LaneKeepMinActivationSpeed') or 25.0))} mph",
+        on_click=lambda: self._show_slider(
+          "LaneKeepMinActivationSpeed", 15.0, 45.0, step=1.0, unit=" mph",
+          value_type="float", title="Minimum Activation Speed",
+        ),
+        visible=lka_on,
+      ),
+    ]
+
+    # ── 3. Lane Changes ──
     self._lane_change_rows = [
       SettingRow(
         "NudgelessLaneChange", "toggle", tr_noop("Auto Lane Changes"),
@@ -218,7 +270,7 @@ class StarPilotLateralLayout(_SettingsPage):
       ),
     ]
 
-    # ── 3. Advanced Lateral Tuning ──
+    # ── 4. Advanced Lateral Tuning ──
     self._advanced_rows = [
       SettingRow(
         "NNFF", "toggle", tr_noop("NNFF"),
@@ -331,7 +383,7 @@ class StarPilotLateralLayout(_SettingsPage):
     self._manager_view = SteeringManagerView(
       self,
       header_title=tr_noop("Steering"),
-      header_subtitle=tr_noop("Configure steering behavior and lane changes."),
+      header_subtitle=tr_noop("Configure steering behavior, lane keep assist, and lane changes."),
     )
 
     p = self._params
@@ -341,6 +393,8 @@ class StarPilotLateralLayout(_SettingsPage):
       get_state=lambda: p.get_bool("AlwaysOnLateral"),
       set_state=lambda s: _confirm_reboot_toggle(p, "AlwaysOnLateral", s) if s else p.put_bool("AlwaysOnLateral", False),
     )
+    pt_lane_keep = self._make_parent("LaneKeepAssist", "Lane Keep Assist (LKA / RDM)",
+      "Gentle boundary nudges and road departure mitigation when manual steering.")
     pt_lane_changes = self._make_parent("LaneChanges", "Lane Changes",
       "Allow openpilot to change lanes.")
     pt_advanced = self._make_parent("AdvancedLateralTune", "Advanced Lateral Tuning",
@@ -353,6 +407,14 @@ class StarPilotLateralLayout(_SettingsPage):
       header_title=tr_noop("Steering Behavior"),
       header_subtitle=tr_noop("Configure Always On Lateral (AOL), pause speed thresholds, and turn signal behaviors."),
       parent_toggle=pt_behavior,
+      panel_style=PANEL_STYLE,
+    )
+    self._sub_panels["lane_keep"] = AetherSettingsView(
+      self,
+      [SettingSection(title="", rows=self._lane_keep_rows)],
+      header_title=tr_noop("Lane Keep Assist (LKA / RDM)"),
+      header_subtitle=tr_noop("Gentle passive boundary nudges and road departure mitigation when drifting toward lines without active centering."),
+      parent_toggle=pt_lane_keep,
       panel_style=PANEL_STYLE,
     )
     self._sub_panels["lane_changes"] = AetherSettingsView(
@@ -372,6 +434,20 @@ class StarPilotLateralLayout(_SettingsPage):
       panel_style=PANEL_STYLE,
     )
     self._wire_sub_panels()
+
+  def _get_lane_keep_mode_display(self) -> str:
+    val = self._params.get_int("LaneKeepMode") or 2
+    for opt_val, label in _LANE_KEEP_MODE_OPTIONS:
+      if opt_val == val:
+        return tr(label)
+    return tr("Lane Lines & Road Edge")
+
+  def _get_lane_keep_sensitivity_display(self) -> str:
+    val = self._params.get_int("LaneKeepSensitivity")
+    for opt_val, label in _LANE_KEEP_SENSITIVITY_OPTIONS:
+      if opt_val == val:
+        return tr(label)
+    return tr("Normal (8-10 in margin)")
 
   def _on_pause_lateral_speed_clicked(self):
     def on_speed_close(res, val):

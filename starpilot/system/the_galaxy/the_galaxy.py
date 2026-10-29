@@ -3481,14 +3481,10 @@ def _get_param_type_info():
           types[k] = str
 
     for k, dt in _get_layout_type_overrides().items():
-      if k not in EXCLUDED_KEYS:
-        _cached_allowed_keys.add(k)
-        if k not in types:
-          types[k] = float if dt == "float" else (int if dt == "int" else (bool if dt == "bool" else str))
-        elif dt in ("int", "float") and types[k] == bool:
-          types[k] = float if dt == "float" else int
-        elif dt == "bool":
-          types[k] = bool
+      if k in types and dt in ("int", "float") and types[k] == bool:
+        types[k] = float if dt == "float" else int
+      elif k in types and dt == "bool":
+        types[k] = bool
 
     # Zero-valued offsets must stay numeric; legacy inference treats "0" as bool.
     from openpilot.starpilot.common.screen_settings import SCREEN_INT_KEYS
@@ -3522,15 +3518,6 @@ def _get_static_default_param_values():
       for key, default_val, _, _ in starpilot_default_params
       if key not in EXCLUDED_KEYS
     }
-    for k, meta in _get_layout_param_metadata().items():
-      if k not in EXCLUDED_KEYS and k not in _cached_static_default_values:
-        dt = meta.get("data_type", "bool")
-        if dt == "bool":
-          _cached_static_default_values[k] = True if meta.get("default") in (True, "1", 1) else False
-        elif dt in ("int", "float"):
-          _cached_static_default_values[k] = meta.get("default", 0)
-        else:
-          _cached_static_default_values[k] = meta.get("default", "")
   return _cached_static_default_values
 
 def _get_default_param_values():
@@ -3578,56 +3565,19 @@ def _safe_params_get(key, encoding=None, default=None):
       return params.get(key, encoding=encoding)
     return params.get(key)
   except Exception:
-    try:
-      p = Path(params.get_param_path(key))
-      if p.is_file():
-        content = p.read_text(encoding="utf-8")
-        return content if encoding else content.encode("utf-8")
-    except Exception:
-      pass
     return default
 
 def _safe_params_get_live_raw(key, default=None, block=False):
   try:
     return _params_live_raw.get(key, block=block)
   except Exception:
-    try:
-      p = Path(params.get_param_path(key))
-      if p.is_file():
-        return p.read_bytes()
-    except Exception:
-      pass
     return default
 
 def _safe_params_get_bool(key, default=False):
   try:
     return params.get_bool(key)
   except Exception:
-    try:
-      p = Path(params.get_param_path(key))
-      if p.is_file():
-        return p.read_text(encoding="utf-8").strip() in ("1", "true", "True")
-    except Exception:
-      pass
     return bool(default)
-
-def _safe_params_put(key, val):
-  try:
-    if isinstance(val, bool):
-      params.put_bool(key, val)
-    else:
-      params.put(key, str(val))
-    return True
-  except Exception:
-    try:
-      p = Path(params.get_param_path(key))
-      p.parent.mkdir(parents=True, exist_ok=True)
-      content = ("1" if val else "0") if isinstance(val, bool) else str(val)
-      p.write_text(content, encoding="utf-8")
-      return True
-    except Exception as e:
-      app.logger.warning(f"Failed fallback write for param {key}: {e}")
-      return False
 
 def _personality_settings_write_locked():
   return _safe_params_get_bool("IsOnroad", default=True) or not _safe_params_get_bool("IsOffroad", default=False)
@@ -6777,7 +6727,7 @@ def setup(app):
         params.put(key, str_val)
         params.put_bool(CUSTOM_ACCEL_PROFILE_INITIALIZED_KEY, True)
       else:
-        _safe_params_put(key, str_val)
+        params.put(key, str_val)
 
       gsm_metered_apply_result = None
       if key == "GsmMetered":
@@ -6821,13 +6771,6 @@ def setup(app):
           response["warning"] = " ".join(warnings)
       if updated:
         response["updated"] = updated
-      else:
-        _, value_types = _get_param_type_info()
-        resolved_type = value_types.get(key, str)
-        if resolved_type == bool:
-          response["updated"] = {key: str_val.strip() in ("1", "true", "True")}
-        else:
-          response["updated"] = {key: str_val}
 
       return jsonify(response), 200
 

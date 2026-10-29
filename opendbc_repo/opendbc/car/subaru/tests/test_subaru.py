@@ -413,7 +413,7 @@ def test_legacy_2025_engagement_continues_from_last_sent_angle():
   msg = controller.lateral_angle(CC, CS)
   parser.update([(2, [msg])])
   assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
-  assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"] == pytest.approx(0.47)
+  assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"] == pytest.approx(0.41)
 
 
 def test_legacy_2025_reengages_immediately_after_manual_steering_stops():
@@ -703,7 +703,7 @@ def test_ascent_reentry_rate_uses_last_transmitted_angle():
   CS.out.steeringRateDeg = -1.99
   parser.update([(2, [controller.lateral_angle(CC, CS)])])
   assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
-  assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"] == pytest.approx(0.53, abs=0.01)
+  assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"] == pytest.approx(0.55, abs=0.01)
 
 
 def test_ascent_angle_controller_waits_for_parking_lot_safety_envelope():
@@ -896,8 +896,8 @@ def test_lkas_hud_standstill_lat_ready_latching():
   controller.driver_override = False
   CS.out.steeringTorque = 0.0
 
-  # 3. MADS disengaged / cruising with no cruise active:
-  # Steering wheel icon turns off completely (0), but lane lines stay illuminated in Drive (1)
+  # 3. MADS disengaged / Cruise Main OFF:
+  # Both steering wheel icon (0) AND lane lines (0) are hidden when lateral system is off
   CC.latActive = False
   CC.enabled = False
   controller.frame = 20
@@ -906,14 +906,28 @@ def test_lkas_hud_standstill_lat_ready_latching():
   assert len(es_lkas) == 1
   parser.update([(3, es_lkas)])
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+  # 3a. LKA-Only standby armed (Cruise_On == 1, lka_armed == True, CC.latActive == False):
+  # Wheel icon shows WHITE (1) and tracked lines show solid WHITE (1)
+  CS.lka_armed = True
+  CS.out.cruiseState = SimpleNamespace(available=True)
+  controller.frame = 30
+  _, can_sends = controller.update(CC, CS, 250_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
+  assert len(es_lkas) == 1
+  parser.update([(35, es_lkas)])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+  CS.lka_armed = False
 
   # 3b. Fully stopped at red light with MADS engaged:
   # wheel stays GREEN (Dash_State = 2) at standstill!
   CC.latActive = True
   CS.out.vEgoRaw = 0.0
   CS.out.standstill = True
-  controller.frame = 30
+  controller.frame = 40
   _, can_sends = controller.update(CC, CS, 300_000_000)
   es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
@@ -921,11 +935,12 @@ def test_lkas_hud_standstill_lat_ready_latching():
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
   CC.latActive = False
+  CS.out.cruiseState = SimpleNamespace(available=False)
 
   # 4. Shifted out of Drive into Park:
   # wheel icon is off (0), lines turn faded (0), screen stays active (1)
   CS.out.gearShifter = structs.CarState.GearShifter.park
-  controller.frame = 40
+  controller.frame = 50
   _, can_sends = controller.update(CC, CS, 400_000_000)
   es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
@@ -939,7 +954,7 @@ def test_lkas_hud_standstill_lat_ready_latching():
   # 5. Shifted into Reverse:
   # LKAS_ACTIVE stays 1 to prevent display flickering, wheel icon off (0), lines faded (0)
   CS.out.gearShifter = structs.CarState.GearShifter.reverse
-  controller.frame = 50
+  controller.frame = 60
   _, can_sends = controller.update(CC, CS, 500_000_000)
   es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(es_lkas) == 1
@@ -994,17 +1009,20 @@ def test_lkas_hud_cornering_and_blinker_gates():
     cruiseControl=SimpleNamespace(cancel=False),
   )
   CS = SimpleNamespace(
+    lka_armed=True,
     out=SimpleNamespace(
       vEgoRaw=20.0, steeringAngleDeg=0.0, steeringRateDeg=0.0,
       gearShifter=structs.CarState.GearShifter.drive, standstill=False,
       leftBlinker=False, rightBlinker=False, canValid=True,
+      cruiseState=SimpleNamespace(available=True),
     ),
     es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
   )
 
-  # 1. Straight driving: both lines visible (1)
+  # 1. Straight driving in LKA-Only standby: White wheel (1) and both lines visible (1)
   _, sends = controller.update(CC, CS, 0)
   parser.update([(1, [m for m in sends if m[0] in (0x122, 0x322)])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 
@@ -1211,7 +1229,7 @@ def test_stock_cruise_cancel_fresh_frame_gate_is_ascent_angle_only(platform):
     _, sends = controller.update(CC.as_reader(), CS, frame * 10_000_000, toggles)
     cancel_messages.extend(msg for msg in sends if msg[0] == 0x221)
 
-  assert len(cancel_messages) == (1 if platform == CAR.SUBARU_ASCENT_2023 else 5)
+  assert len(cancel_messages) == (1 if (CP.flags & SubaruFlags.GLOBAL_GEN2 or platform == CAR.SUBARU_ASCENT_2023) else 5)
   assert all(msg[2] == (CanBus.alt if CP.flags & SubaruFlags.GLOBAL_GEN2 else CanBus.main) for msg in cancel_messages)
   parser = CANParser(DBC[platform][Bus.pt], [("ES_Distance", 0)], cancel_messages[0][2])
   parser.update([(1, [cancel_messages[0]])])
@@ -1352,9 +1370,11 @@ def test_legacy_2025_lka_countersteer_nudge():
   es_lkas_angle_parser = CANParser(dbc, [("ES_LKAS_ANGLE", 0)], controller.angle_bus)
   es_lkas_state_parser = CANParser(dbc, [("ES_LKAS_State", 0)], controller.status_bus)
 
+  # Comma-safe LKA nudge architecture: controlsd sets CC.latActive=True and passes
+  # curvature-anchored steeringAngleDeg while CS.lka_armed=True, CS.lka_nudge_active=True
   CC = SimpleNamespace(
-    enabled=False, latActive=False, longActive=False,
-    actuators=SimpleNamespace(steeringAngleDeg=0.0, accel=0.0),
+    enabled=False, latActive=True, longActive=False,
+    actuators=SimpleNamespace(steeringAngleDeg=3.5, accel=0.0),
     hudControl=SimpleNamespace(
       visualAlert=VisualAlert.none, leadVisible=False,
       leftLaneVisible=True, rightLaneVisible=True,
@@ -1363,18 +1383,22 @@ def test_legacy_2025_lka_countersteer_nudge():
     cruiseControl=SimpleNamespace(cancel=False),
   )
   CS = SimpleNamespace(
+    lka_armed=True,
+    lka_nudge_active=True,
     out=SimpleNamespace(
-      vEgoRaw=20.0, steeringAngleDeg=5.0, steeringRateDeg=0.0, steeringTorque=0.0,
+      vEgo=20.0, vEgoRaw=20.0, steeringAngleDeg=5.0, steeringRateDeg=12.0, steeringTorque=0.0,
       gearShifter=structs.CarState.GearShifter.drive, standstill=False,
       canValid=True, leftBlinker=False, rightBlinker=False,
+      cruiseState=SimpleNamespace(available=True),
     ),
     es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
   )
 
-  # 1. Left lane departure nudge: commands gentle countersteer (-1.5 deg offset)
-  # Steering angle smoothly rate-limits from 5.0 towards 3.5 deg
-  # LKAS_Dash_State stays 0 (no wheel icon during pure manual driving)
-  # LKAS_Left_Line_Visible = 3 (amber line on dash)
+  # 1. Left lane departure nudge:
+  # - Drift re-entry rate 12.0 deg/s <= 15.0 deg/s is allowed (not blocked by MADS 5.0 deg/s gate)
+  # - Steering angle smoothly rate-limits from 5.0 to 3.5 deg
+  # - LKAS_Dash_State stays 1 (White wheel during LKA-Only standby & active nudges)
+  # - LKAS_Left_Line_Visible = 3 (Amber line on cluster)
   for frame in range(11):
     controller.frame = frame
     _, can_sends = controller.update(CC, CS, frame * 20_000_000)
@@ -1388,11 +1412,12 @@ def test_legacy_2025_lka_countersteer_nudge():
   state_msgs = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(state_msgs) == 1
   es_lkas_state_parser.update([(1, state_msgs)])
-  assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
+  assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 3
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 
-  # 2. Right lane departure nudge: commands +1.5 deg countersteer from current angle (5.0 -> 6.5 deg)
+  # 2. Right lane departure nudge: commands 6.5 deg target
+  CC.actuators.steeringAngleDeg = 6.5
   CC.hudControl.leftLaneDepart = False
   CC.hudControl.rightLaneDepart = True
   for frame in range(11, 31):
@@ -1408,8 +1433,157 @@ def test_legacy_2025_lka_countersteer_nudge():
   state_msgs = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
   assert len(state_msgs) == 1
   es_lkas_state_parser.update([(2, state_msgs)])
+  assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 3
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+
+  # 3. Softer LKA driver torque override (135 > _LKA_OVERRIDE_TORQUE_HIGH=120, < MADS 200):
+  # Yields EPS angle request immediately after 3 confirm frames
+  CS.out.steeringTorque = 135.0
+  for frame in range(32, 39, 2):
+    controller.frame = frame
+    _, can_sends = controller.update(CC, CS, frame * 10_000_000)
+  angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
+  es_lkas_angle_parser.update([(3, angle_msgs)])
+  assert es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
+
+
+def test_legacy_2025_lane_centering_button_emits_lkas_event_only_when_cruise_available():
+  from opendbc.car.subaru.carstate import CarState
+
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  cs = CarState(CP, CP)
+  parsers = CarState.get_can_parsers(CP)
+  packer = CANPacker(DBC[CAR.SUBARU_LEGACY_2025][Bus.pt])
+  toggles = SimpleNamespace(subaru_sng=False, subaru_redneck_cruise=False)
+
+  def step(ts, *, cruise_on, cam_dash_state, steer_warning=0):
+    msgs = [
+      packer.make_can_msg("ES_DashStatus", CanBus.camera, {"Cruise_On": int(cruise_on)}),
+      packer.make_can_msg("ES_LKAS_State", CanBus.camera, {"LKAS_Dash_State": int(cam_dash_state)}),
+      packer.make_can_msg("Steering_Torque", CanBus.main_for_cp(CP), {"Steer_Warning": int(steer_warning)}),
+    ]
+    for parser in parsers.values():
+      parser.update([(ts, msgs)])
+    ret, _ = cs.update(parsers, toggles)
+    return list(ret.buttonEvents)
+
+  # 1. Boot frame with Cruise_On=0, LKAS_Dash_State=0 -> no event
+  assert step(1, cruise_on=0, cam_dash_state=0) == []
+
+  # 2. Spurious camera dash state change while Cruise_On=0 -> ignored
+  assert step(2, cruise_on=0, cam_dash_state=1) == []
+  assert step(3, cruise_on=0, cam_dash_state=0) == []
+
+  # 3. Rising edge of Cruise_On (0 -> 1) simultaneously waking stock EyeSight dash state (0 -> 2) -> NOT a button press!
+  assert step(4, cruise_on=1, cam_dash_state=2) == []
+
+  # 4. Physical Lane Centering button press while Cruise_On == 1 (2 -> 0) -> emits ButtonType.lkas press+release!
+  events = step(5, cruise_on=1, cam_dash_state=0)
+  assert [(e.type, e.pressed) for e in events] == [
+    (structs.CarState.ButtonEvent.Type.lkas, True),
+    (structs.CarState.ButtonEvent.Type.lkas, False),
+  ]
+
+  # 5. Second physical Lane Centering button press while Cruise_On == 1 (0 -> 1) -> emits ButtonType.lkas press+release!
+  events2 = step(6, cruise_on=1, cam_dash_state=1)
+  assert [(e.type, e.pressed) for e in events2] == [
+    (structs.CarState.ButtonEvent.Type.lkas, True),
+    (structs.CarState.ButtonEvent.Type.lkas, False),
+  ]
+
+  # 6. Camera drops LKAS_Dash_State due to Steer_Warning fault -> ignored (not a button press)
+  assert step(7, cruise_on=1, cam_dash_state=0, steer_warning=1) == []
+
+  # 7. Turning Cruise_On OFF (1 -> 0) while dash state changes -> ignored
+  assert step(8, cruise_on=1, cam_dash_state=1, steer_warning=0) == []
+  assert step(9, cruise_on=0, cam_dash_state=0, steer_warning=0) == []
+
+
+def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw():
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  packer = CANPacker(dbc)
+  parser = CANParser(dbc, [("ES_LKAS_State", 0)], CanBus.main)
+
+  seq = 0
+  def next_seq():
+    nonlocal seq
+    seq += 1
+    return seq
+
+  # 1. Background EyeSight centering / toggle / hands-off chimes on 0x322 (25, 27, 28, 30) and LKAS_Alert_Msg
+  for bg_code in (25, 27, 28, 30):
+    f = next_seq()
+    stock = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": bg_code, "LKAS_Alert_Msg": 1})
+    msg = subarucan.create_es_lkas_state(
+      packer, f, stock, False, VisualAlert.none, 1, 1, False, False, CanBus.main, ready=True,
+    )
+    parser.update([(f, [msg])])
+    assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == 0
+    assert parser.vl["ES_LKAS_State"]["LKAS_Alert_Msg"] == 0
+
+  # 2. Stock FCW (1, 2) always passes through on 0x322; native LDW (11, 12) is silenced during
+  # silent LKA boundary nudges (left_line=3) and passes through when not actively nudging (left_line=1)
+  for fcw_code in (1, 2):
+    f = next_seq()
+    stock = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": fcw_code})
+    msg = subarucan.create_es_lkas_state(
+      packer, f, stock, True, VisualAlert.none, 1, 1, False, False, CanBus.main,
+    )
+    parser.update([(f, [msg])])
+    assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == fcw_code
+
+  for ldw_code in (11, 12):
+    f = next_seq()
+    stock_nudge = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": ldw_code})
+    msg_nudge = subarucan.create_es_lkas_state(
+      packer, f, stock_nudge, False, VisualAlert.none, 3, 1, True, False, CanBus.main, ready=True,
+    )
+    parser.update([(f, [msg_nudge])])
+    assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == 0
+
+    f = next_seq()
+    stock_passive = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": ldw_code})
+    msg_passive = subarucan.create_es_lkas_state(
+      packer, f, stock_passive, False, VisualAlert.none, 1, 1, False, False, CanBus.main, ready=True,
+    )
+    parser.update([(f, [msg_passive])])
+    assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == ldw_code
+
+  # 3. openpilot VisualAlert.steerRequired suppresses stock chime 28 and sets LKAS_Alert_Msg=1
+  f = next_seq()
+  stock = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": 28})
+  msg = subarucan.create_es_lkas_state(
+    packer, f, stock, True, VisualAlert.steerRequired, 1, 1, False, False, CanBus.main,
+  )
+  parser.update([(f, [msg])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Alert_Msg"] == 1
+
+  # 4. Secondary 0x3C4 alert filtering when armed=True (LKA-Only standby with lkas_active=False)
+  def make_3c4(counter, payload3_hex, tail3_hex="000000"):
+    raw = bytearray.fromhex(f"00{counter:02x}{payload3_hex}{tail3_hex}")
+    raw[0] = (0xc4 + 3 + sum(raw[1:])) & 0xff
+    return bytes(raw)
+
+  # Background EyeSight hands-off / toggle codes are cleared to 000000 even when lkas_active=False if armed=True
+  for bg_hex in ("000104", "1c0704", "1e0030", "190100", "1b0204"):
+    raw = make_3c4(4, bg_hex, "5a0000")
+    _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw, False, VisualAlert.none, armed=True)
+    assert out_dat[2:5] == bytes(3)
+    assert out_dat[5] == 0x5a  # Preserves opaque byte 5!
+
+  # Stock FCW codes (010104, 0e0000) are preserved untouched on 0x3C4!
+  for fcw_hex in ("010104", "0e0000"):
+    raw = make_3c4(5, fcw_hex, "120000")
+    _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw, True, VisualAlert.none, armed=True)
+    assert out_dat[2:5] == bytes.fromhex(fcw_hex)
+
+  # openpilot VisualAlert.steerRequired injects 000104 when armed=True (e.g. LKA 8s hands-on warning)
+  raw_idle = make_3c4(6, "000000", "220000")
+  _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw_idle, False, VisualAlert.steerRequired, armed=True)
+  assert out_dat[2:5] == bytes.fromhex("000104")
+  assert out_dat[5] == 0x22
 
 
 

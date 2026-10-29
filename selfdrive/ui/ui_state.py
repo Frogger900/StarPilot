@@ -71,6 +71,7 @@ class UIState:
         "liveParameters",
         "rawAudioData",
         "starpilotCarState",
+        "starpilotLateralState",
         "starpilotPlan",
         "starpilotRadarState",
         "starpilotSelfdriveState",

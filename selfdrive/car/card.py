@@ -113,6 +113,7 @@ class Car:
     self.CC_prev = car.CarControl.new_message()
     self.CS_prev = car.CarState.new_message()
     self.initialized_prev = False
+    self.lka_armed_last = False
 
     self.last_actuators_output = structs.CarControl.Actuators()
     self.last_steering_limit_info: dict[str, bool | float | int] | None = None
@@ -256,7 +257,7 @@ class Car:
 
     self.starpilot_card = StarPilotCard(self.CP, self.FPCP)
 
-    starpilot_services = ['starpilotOnroadEvents', 'starpilotPlan', 'starpilotSelfdriveState', 'liveCalibration', 'selfdriveState']
+    starpilot_services = ['starpilotLateralState', 'starpilotOnroadEvents', 'starpilotPlan', 'starpilotSelfdriveState', 'liveCalibration', 'selfdriveState']
     if self.CP.brand == "rivian":
       starpilot_services.append('liveParameters')
     self.sm = self.sm.extend(starpilot_services)
@@ -374,6 +375,7 @@ class Car:
       CS, FPCS, self.sm, self.starpilot_toggles, preap_authorized=preap_authorized,
       ev6_aol_authorized=getattr(self.CI.CS, 'ev6_aol_authorized', False),
     )
+    self.lka_armed_last = bool(getattr(FPCS, 'lkaArmed', False))
     return CS, RD, FPCS
 
   def state_publish(self, CS: car.CarState, RD: structs.RadarDataT | None, FPCS: custom.StarPilotCarState):
@@ -482,6 +484,12 @@ class Car:
         live_params = self.sm['liveParameters']
         self.CI.CC.update_live_params(live_params.roll, live_params.angleOffsetDeg,
                                       live_params.stiffnessFactor, live_params.steerRatio)
+      self.CI.CS.lka_armed = self.lka_armed_last
+      self.CI.CS.lka_nudge_active = bool(
+        self.lka_armed_last and
+        self.sm.valid['starpilotLateralState'] and
+        self.sm['starpilotLateralState'].lkaActive
+      )
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos, self.starpilot_toggles)
       get_steering_limit_info = getattr(self.CI.CC, "get_steering_limit_info", None)
       self.last_steering_limit_info = get_steering_limit_info() if get_steering_limit_info is not None else None

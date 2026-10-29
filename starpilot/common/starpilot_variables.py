@@ -90,7 +90,8 @@ def _lkas_allowed_for_aol(car_make, cp_flags, fpcp_safety_configs) -> bool:
   hyundai_can_use_lkas_for_aol = car_make == "hyundai" and (
     bool(cp_flags & HyundaiFlags.CANFD) or hyundai_has_lda_button
   )
-  return hyundai_can_use_lkas_for_aol or car_make in ("ford", "honda")
+  subaru_can_use_lkas_for_aol = car_make == "subaru" and not bool(cp_flags & SubaruFlags.PREGLOBAL)
+  return hyundai_can_use_lkas_for_aol or subaru_can_use_lkas_for_aol or car_make in ("ford", "honda")
 
 
 def _main_cruise_aol_allowed(button_control: float) -> bool:
@@ -817,7 +818,7 @@ class StarPilotVariables:
       "LaneCenteringE2EAuthority", cast=float, condition=toggle.lane_centering,
       default=1.0, min=0.0, max=1.0,
     )
-    toggle.lane_keep_assist = self.get_value("LaneKeepAssist", default=True)
+    toggle.lane_keep_assist = self.get_value("LaneKeepAssist", default=False)
     toggle.lane_keep_mode = self.get_value("LaneKeepMode", cast=int, condition=toggle.lane_keep_assist, default=2, min=0, max=2)
     toggle.lane_keep_sensitivity = self.get_value("LaneKeepSensitivity", cast=int, condition=toggle.lane_keep_assist, default=1, min=0, max=2)
     toggle.lane_keep_min_speed = self.get_value("LaneKeepMinActivationSpeed", cast=float, condition=toggle.lane_keep_assist, default=25.0, min=15.0, max=45.0)

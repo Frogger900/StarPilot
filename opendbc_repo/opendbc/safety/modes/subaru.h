@@ -165,7 +165,6 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
 
   if (subaru_lkas_angle && (msg->addr == MSG_SUBARU_ES_DashStatus) && (msg->bus == SUBARU_CAM_BUS)) {
     acc_main_on = GET_BIT(msg, 49U);
-    lkas_on = true;
   }
 
   if (!subaru_lkas_angle && (msg->addr == MSG_SUBARU_CruiseControl) && (msg->bus == alt_main_bus)) {

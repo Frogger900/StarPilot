@@ -26,6 +26,12 @@ from openpilot.selfdrive.controls.lib.drive_helpers import (
   update_lateral_fault_latch,
 )
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
+from openpilot.selfdrive.controls.lib.lanekeep import (
+  LaneKeepAlert,
+  LaneKeepController,
+  LaneKeepMode,
+  LaneKeepSensitivity,
+)
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle
@@ -400,6 +406,10 @@ class Controls:
     self.desired_curvature = 0.0
     self.lc_smooth_release = 0.0
     self.lane_centering = LaneCenteringController()
+    self.lka = LaneKeepController()
+    self.lka_anchor_curvature = 0.0
+    self.lka_was_active = False
+    self.lka_armed_last = False
     self.lc_entry_sign = 0.0
     self.lc_arrest_jerk_factor = 1.0
     self.turn_hold_curvature = 0.0
@@ -545,6 +555,45 @@ class Controls:
                                         CS.steerFaultTemporary, CS.steerFaultPermanent,
                                         standstill, self.CP.steerAtStandstill,
                                         self.sm['starpilotPlan'].lateralCheck)
+
+    centering_lat_active = bool(CC.latActive)
+    lka_armed_raw = bool(getattr(self.sm['starpilotCarState'], 'lkaArmed', False))
+    self.lka_armed_last = lka_armed_raw
+    lka_can_run = (
+      lka_armed_raw and
+      not CS.steerFaultTemporary and
+      not CS.steerFaultPermanent and
+      not standstill and
+      self.sm.valid['modelV2']
+    )
+    if lka_can_run:
+      lka_mode = int(getattr(self.starpilot_toggles, "lane_keep_mode", LaneKeepMode.LANE_LINE_AND_ROAD_EDGE))
+      lka_sensitivity = int(getattr(self.starpilot_toggles, "lane_keep_sensitivity", LaneKeepSensitivity.NORMAL))
+      lka_min_speed = float(getattr(self.starpilot_toggles, "lane_keep_min_speed", 25.0))
+      self.lka.update(
+        model_v2=model_v2,
+        v_ego=CS.vEgo,
+        steering_angle_deg=CS.steeringAngleDeg,
+        steering_torque=CS.steeringTorque,
+        left_blinker=CS.leftBlinker,
+        right_blinker=CS.rightBlinker,
+        lat_active=centering_lat_active,
+        steering_pressed=CS.steeringPressed,
+        mode=lka_mode,
+        sensitivity=lka_sensitivity,
+        min_activation_speed_mph=lka_min_speed,
+        dt=DT_CTRL,
+      )
+    else:
+      self.lka.reset(full=not lka_armed_raw)
+
+    lka_actuating = (not centering_lat_active) and lka_can_run and self.lka.active
+    if lka_actuating:
+      if not self.lka_was_active:
+        self.lka_anchor_curvature = self.curvature
+      CC.latActive = True
+    self.lka_was_active = lka_actuating
+
     # EcuDisableFailed is set when car started in READY mode (ECU disable was rejected)
     # Disable longitudinal so stock ACC works instead
     self.update_ecu_disable_failed()
@@ -581,218 +630,229 @@ class Controls:
                                 self.starpilot_toggles.max_desired_acceleration))
 
     # Steering PID loop and lateral MPC
-    # Reset desired curvature to current to avoid violating the limits on engage
-    if self.sm.valid['lateralManeuverPlan']:
-      new_desired_curvature = self.sm['lateralManeuverPlan'].desiredCurvature if CC.latActive else self.curvature
-    else:
-      new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
-
-    # Low-speed turn-intent hold (see CURVATURE_HOLD_* above). Curvature sign convention
-    # here is positive for RIGHT turns (pauseturn log: left turn at +148 deg steering
-    # angle logs desiredCurvature -0.07), so the blinker maps right=+1, left=-1.
-    blinker_dir = float(CS.rightBlinker) - float(CS.leftBlinker)
-    if (CC.latActive and self.twitch_guard_remaining > 0.0 and
-        blinker_dir == 0.0 and self.turn_hold_curvature == 0.0):
-      new_desired_curvature = limit_curvature_to_plan(model_v2, new_desired_curvature, CS.vEgo)
-    # heading swept in the blinker's direction over the whole blinker cycle (any speed):
-    # discriminates a turn not yet made from one being exited (see the re-arm below)
-    if blinker_dir == 0.0:
-      self.turn_blinker_swept = 0.0
-    else:
-      self.turn_blinker_swept += max(CS.vEgo * self.curvature * blinker_dir, 0.0) * DT_CTRL
-    if CS.vEgo >= CURVATURE_HOLD_RELEASE_SPEED:
-      self.turn_hold_curvature = 0.0
-      self.turn_hold_standstill_t = 0.0
-      self.turn_hold_swept = 0.0
-      self.turn_hold_handoff_t = 0.0
-      self.turn_hold_done = False
-    else:
-      if self.turn_hold_curvature == 0.0:
-        self.turn_hold_swept = 0.0
+    if lka_actuating:
+      self.lane_centering.reset()
+      jerk_factor = 1.0
+      road_curv = float(model_v2.action.desiredCurvature)
+      if self.lka.desired_curvature >= 0.0:
+        base_curv = max(self.lka_anchor_curvature, road_curv)
       else:
-        # heading actually swept in the hold's direction: the measure of turn progress
-        self.turn_hold_swept += max(CS.vEgo * self.curvature * math.copysign(1.0, self.turn_hold_curvature), 0.0) * DT_CTRL
-      turn_exiting = self.turn_hold_swept > CURVATURE_HOLD_SWEPT_EXIT
-      if (CS.vEgo > CURVATURE_HOLD_HARD_SPEED or turn_exiting) and CC.latActive and self.turn_hold_curvature != 0.0:
-        # Decay toward the model's sustained same-direction demand instead of leaking on
-        # wall-clock time: a wall-clock leak drained the floor mid-turn while the model
-        # dipped transiently (turnn rlog 40.0-40.5s), while sustained low demand (end of
-        # turn, abort) still drains the hold within a couple of time constants.
-        hold_dir = math.copysign(1.0, self.turn_hold_curvature)
-        model_mag = max(new_desired_curvature * hold_dir, 0.0)
-        if model_mag < abs(self.turn_hold_curvature):
-          decay_tau = CURVATURE_HOLD_EXIT_DECAY_TAU if turn_exiting else CURVATURE_HOLD_DECAY_TAU
-          decayed = abs(self.turn_hold_curvature) + (model_mag - abs(self.turn_hold_curvature)) * (DT_CTRL / decay_tau)
-          self.turn_hold_curvature = math.copysign(decayed, self.turn_hold_curvature)
-      if CS.vEgo < 0.5:
-        self.turn_hold_standstill_t += DT_CTRL
-        if self.turn_hold_standstill_t > CURVATURE_HOLD_STANDSTILL_TIMEOUT:
-          self.turn_hold_curvature = 0.0
-        # a stop resets the turn cycle: the model goes blind again, so a prior handoff
-        # must not block the standstill pre-wind (turn4 regression in v9 replay)
+        base_curv = min(self.lka_anchor_curvature, road_curv)
+      new_desired_curvature = base_curv + self.lka.desired_curvature
+    else:
+      # Steering PID loop and lateral MPC
+      # Reset desired curvature to current to avoid violating the limits on engage
+      if self.sm.valid['lateralManeuverPlan']:
+        new_desired_curvature = self.sm['lateralManeuverPlan'].desiredCurvature if CC.latActive else self.curvature
+      else:
+        new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
+
+      # Low-speed turn-intent hold (see CURVATURE_HOLD_* above). Curvature sign convention
+      # here is positive for RIGHT turns (pauseturn log: left turn at +148 deg steering
+      # angle logs desiredCurvature -0.07), so the blinker maps right=+1, left=-1.
+      blinker_dir = float(CS.rightBlinker) - float(CS.leftBlinker)
+      if (CC.latActive and self.twitch_guard_remaining > 0.0 and
+          blinker_dir == 0.0 and self.turn_hold_curvature == 0.0):
+        new_desired_curvature = limit_curvature_to_plan(model_v2, new_desired_curvature, CS.vEgo)
+      # heading swept in the blinker's direction over the whole blinker cycle (any speed):
+      # discriminates a turn not yet made from one being exited (see the re-arm below)
+      if blinker_dir == 0.0:
+        self.turn_blinker_swept = 0.0
+      else:
+        self.turn_blinker_swept += max(CS.vEgo * self.curvature * blinker_dir, 0.0) * DT_CTRL
+      if CS.vEgo >= CURVATURE_HOLD_RELEASE_SPEED:
+        self.turn_hold_curvature = 0.0
+        self.turn_hold_standstill_t = 0.0
+        self.turn_hold_swept = 0.0
+        self.turn_hold_handoff_t = 0.0
         self.turn_hold_done = False
       else:
-        self.turn_hold_standstill_t = 0.0
-      if CC.latActive and self.turn_hold_curvature != 0.0 and \
-         new_desired_curvature * math.copysign(1.0, self.turn_hold_curvature) < -CURVATURE_HOLD_OPPOSITE_RELEASE:
-        # model is actively counter-steering: the turn is over, release at any speed
-        self.turn_hold_curvature = 0.0
-        self.turn_hold_done = True
-      if CC.latActive and self.turn_hold_curvature != 0.0 and \
-         new_desired_curvature * math.copysign(1.0, self.turn_hold_curvature) >= CURVATURE_HOLD_HANDOFF_FRAC * abs(self.turn_hold_curvature):
-        self.turn_hold_handoff_t += DT_CTRL
-        if self.turn_hold_handoff_t > CURVATURE_HOLD_HANDOFF_TIME:
-          # action has sustainably taken over: hand off completely (see HANDOFF consts)
+        if self.turn_hold_curvature == 0.0:
+          self.turn_hold_swept = 0.0
+        else:
+          # heading actually swept in the hold's direction: the measure of turn progress
+          self.turn_hold_swept += max(CS.vEgo * self.curvature * math.copysign(1.0, self.turn_hold_curvature), 0.0) * DT_CTRL
+        turn_exiting = self.turn_hold_swept > CURVATURE_HOLD_SWEPT_EXIT
+        if (CS.vEgo > CURVATURE_HOLD_HARD_SPEED or turn_exiting) and CC.latActive and self.turn_hold_curvature != 0.0:
+          # Decay toward the model's sustained same-direction demand instead of leaking on
+          # wall-clock time: a wall-clock leak drained the floor mid-turn while the model
+          # dipped transiently (turnn rlog 40.0-40.5s), while sustained low demand (end of
+          # turn, abort) still drains the hold within a couple of time constants.
+          hold_dir = math.copysign(1.0, self.turn_hold_curvature)
+          model_mag = max(new_desired_curvature * hold_dir, 0.0)
+          if model_mag < abs(self.turn_hold_curvature):
+            decay_tau = CURVATURE_HOLD_EXIT_DECAY_TAU if turn_exiting else CURVATURE_HOLD_DECAY_TAU
+            decayed = abs(self.turn_hold_curvature) + (model_mag - abs(self.turn_hold_curvature)) * (DT_CTRL / decay_tau)
+            self.turn_hold_curvature = math.copysign(decayed, self.turn_hold_curvature)
+        if CS.vEgo < 0.5:
+          self.turn_hold_standstill_t += DT_CTRL
+          if self.turn_hold_standstill_t > CURVATURE_HOLD_STANDSTILL_TIMEOUT:
+            self.turn_hold_curvature = 0.0
+          # a stop resets the turn cycle: the model goes blind again, so a prior handoff
+          # must not block the standstill pre-wind (turn4 regression in v9 replay)
+          self.turn_hold_done = False
+        else:
+          self.turn_hold_standstill_t = 0.0
+        if CC.latActive and self.turn_hold_curvature != 0.0 and \
+           new_desired_curvature * math.copysign(1.0, self.turn_hold_curvature) < -CURVATURE_HOLD_OPPOSITE_RELEASE:
+          # model is actively counter-steering: the turn is over, release at any speed
           self.turn_hold_curvature = 0.0
           self.turn_hold_done = True
-      else:
-        self.turn_hold_handoff_t = 0.0
-      if blinker_dir == 0.0:
-        # blinker cycle over: a fresh turn may engage a fresh hold
-        self.turn_hold_done = False
-      elif CC.latActive and CS.steeringPressed and CS.steeringTorque * blinker_dir < 0.0 and \
-           self.curvature * blinker_dir > CURVATURE_HOLD_CONFIRM_MIN and \
-           self.turn_blinker_swept < CURVATURE_HOLD_CONFIRM_SWEPT:
-        # nudge-to-commit ten seconds later at the real turn (0000087f seg 1: +418 haul
-        # unassisted). The swept gate keeps a light same-direction touch during the
-        # EXIT unwind from re-latching a large hold against the model's recentering
-        # (0000087f seg 4 t=14.5 in replay: floor trailed the exit by 0.07 for 1.5 s).
-        self.turn_hold_done = False
-      if blinker_dir != 0.0 and not self.turn_hold_done:
-        # Ratchet up on the raw model command, never on the floored/measured value, so
-        # the hold can't feed itself and defeat the decay. Below the release speed the
-        # plan's spatial curvature (see get_plan_spatial_curvature) is the second,
-        # earlier-seeing source: it shows the turn at standstill while the action is
-        # still blind, letting the pre-wind start before the car moves.
-        turn_candidate = new_desired_curvature if CC.latActive else 0.0
-        if CC.latActive and CS.vEgo < CURVATURE_HOLD_PLAN_SOURCE_SPEED:
-          plan_curvature = get_plan_spatial_curvature(model_v2) * CURVATURE_HOLD_PLAN_SCALE
-          plan_curvature = max(min(plan_curvature, CURVATURE_HOLD_PLAN_CAP), -CURVATURE_HOLD_PLAN_CAP)
-          # Proximity gate (see CURVATURE_HOLD_ONSET_*): wind only as the corner closes,
-          # so a stop-line turn winds at the line and an early blinker doesn't turn in
-          # early. Full at ONSET_NEAR, zero at ONSET_FAR_GATE.
-          onset = get_plan_turn_onset_dist(model_v2)
-          onset_w = min(max((CURVATURE_HOLD_ONSET_FAR_GATE - onset) /
-                            (CURVATURE_HOLD_ONSET_FAR_GATE - CURVATURE_HOLD_ONSET_NEAR), 0.0), 1.0)
-          reach = get_plan_reach(model_v2)
-          reach_w = min(max((reach - CURVATURE_HOLD_REACH_MIN) /
-                            (CURVATURE_HOLD_REACH_FULL - CURVATURE_HOLD_REACH_MIN), 0.0), 1.0)
-          plan_curvature *= onset_w * reach_w
-          if plan_curvature * blinker_dir > turn_candidate * blinker_dir:
-            turn_candidate = plan_curvature
-        # Nudge-to-commit (see CURVATURE_HOLD_CONFIRM_*): the driver actively pushing in
-        # the blinker direction at creep speed captures what they have wound. Positive
-        # steeringTorque is a LEFT push (negative curvature), so agreement is a negative
-        # product with blinker_dir. Exempt from the ratchet rate limit: latching the
-        # wheel's current position commands no motion, only keeps the driver's progress.
-        driver_confirmed = False
-        if CC.latActive and CS.steeringPressed and \
-           CS.steeringTorque * blinker_dir < 0.0 and self.curvature * blinker_dir > CURVATURE_HOLD_CONFIRM_MIN:
-          wound_curvature = max(min(self.curvature, CURVATURE_HOLD_PLAN_CAP), -CURVATURE_HOLD_PLAN_CAP)
-          if wound_curvature * blinker_dir > turn_candidate * blinker_dir:
-            turn_candidate = wound_curvature
-            driver_confirmed = True
-        if turn_candidate * blinker_dir > abs(self.turn_hold_curvature):
-          new_mag = turn_candidate * blinker_dir
-          if CS.vEgo > CURVATURE_HOLD_PLAN_SOURCE_SPEED and not driver_confirmed:
-            new_mag = min(new_mag, abs(self.turn_hold_curvature) + CURVATURE_HOLD_RATCHET_RATE * DT_CTRL)
-          self.turn_hold_curvature = math.copysign(new_mag, turn_candidate)
-        elif self.turn_hold_curvature * blinker_dir < 0.0:
-          # blinker flipped to the other side: turn intent changed
-          self.turn_hold_curvature = 0.0
-      if CC.latActive and self.turn_hold_curvature != 0.0:
-        hold_dir = math.copysign(1.0, self.turn_hold_curvature)
-        if new_desired_curvature * hold_dir < abs(self.turn_hold_curvature):
-          new_desired_curvature = self.turn_hold_curvature
+        if CC.latActive and self.turn_hold_curvature != 0.0 and \
+           new_desired_curvature * math.copysign(1.0, self.turn_hold_curvature) >= CURVATURE_HOLD_HANDOFF_FRAC * abs(self.turn_hold_curvature):
+          self.turn_hold_handoff_t += DT_CTRL
+          if self.turn_hold_handoff_t > CURVATURE_HOLD_HANDOFF_TIME:
+            # action has sustainably taken over: hand off completely (see HANDOFF consts)
+            self.turn_hold_curvature = 0.0
+            self.turn_hold_done = True
+        else:
+          self.turn_hold_handoff_t = 0.0
+        if blinker_dir == 0.0:
+          # blinker cycle over: a fresh turn may engage a fresh hold
+          self.turn_hold_done = False
+        elif CC.latActive and CS.steeringPressed and CS.steeringTorque * blinker_dir < 0.0 and \
+             self.curvature * blinker_dir > CURVATURE_HOLD_CONFIRM_MIN and \
+             self.turn_blinker_swept < CURVATURE_HOLD_CONFIRM_SWEPT:
+          # nudge-to-commit ten seconds later at the real turn (0000087f seg 1: +418 haul
+          # unassisted). The swept gate keeps a light same-direction touch during the
+          # EXIT unwind from re-latching a large hold against the model's recentering
+          # (0000087f seg 4 t=14.5 in replay: floor trailed the exit by 0.07 for 1.5 s).
+          self.turn_hold_done = False
+        if blinker_dir != 0.0 and not self.turn_hold_done:
+          # Ratchet up on the raw model command, never on the floored/measured value, so
+          # the hold can't feed itself and defeat the decay. Below the release speed the
+          # plan's spatial curvature (see get_plan_spatial_curvature) is the second,
+          # earlier-seeing source: it shows the turn at standstill while the action is
+          # still blind, letting the pre-wind start before the car moves.
+          turn_candidate = new_desired_curvature if CC.latActive else 0.0
+          if CC.latActive and CS.vEgo < CURVATURE_HOLD_PLAN_SOURCE_SPEED:
+            plan_curvature = get_plan_spatial_curvature(model_v2) * CURVATURE_HOLD_PLAN_SCALE
+            plan_curvature = max(min(plan_curvature, CURVATURE_HOLD_PLAN_CAP), -CURVATURE_HOLD_PLAN_CAP)
+            # Proximity gate (see CURVATURE_HOLD_ONSET_*): wind only as the corner closes,
+            # so a stop-line turn winds at the line and an early blinker doesn't turn in
+            # early. Full at ONSET_NEAR, zero at ONSET_FAR_GATE.
+            onset = get_plan_turn_onset_dist(model_v2)
+            onset_w = min(max((CURVATURE_HOLD_ONSET_FAR_GATE - onset) /
+                              (CURVATURE_HOLD_ONSET_FAR_GATE - CURVATURE_HOLD_ONSET_NEAR), 0.0), 1.0)
+            reach = get_plan_reach(model_v2)
+            reach_w = min(max((reach - CURVATURE_HOLD_REACH_MIN) /
+                              (CURVATURE_HOLD_REACH_FULL - CURVATURE_HOLD_REACH_MIN), 0.0), 1.0)
+            plan_curvature *= onset_w * reach_w
+            if plan_curvature * blinker_dir > turn_candidate * blinker_dir:
+              turn_candidate = plan_curvature
+          # Nudge-to-commit (see CURVATURE_HOLD_CONFIRM_*): the driver actively pushing in
+          # the blinker direction at creep speed captures what they have wound. Positive
+          # steeringTorque is a LEFT push (negative curvature), so agreement is a negative
+          # product with blinker_dir. Exempt from the ratchet rate limit: latching the
+          # wheel's current position commands no motion, only keeps the driver's progress.
+          driver_confirmed = False
+          if CC.latActive and CS.steeringPressed and \
+             CS.steeringTorque * blinker_dir < 0.0 and self.curvature * blinker_dir > CURVATURE_HOLD_CONFIRM_MIN:
+            wound_curvature = max(min(self.curvature, CURVATURE_HOLD_PLAN_CAP), -CURVATURE_HOLD_PLAN_CAP)
+            if wound_curvature * blinker_dir > turn_candidate * blinker_dir:
+              turn_candidate = wound_curvature
+              driver_confirmed = True
+          if turn_candidate * blinker_dir > abs(self.turn_hold_curvature):
+            new_mag = turn_candidate * blinker_dir
+            if CS.vEgo > CURVATURE_HOLD_PLAN_SOURCE_SPEED and not driver_confirmed:
+              new_mag = min(new_mag, abs(self.turn_hold_curvature) + CURVATURE_HOLD_RATCHET_RATE * DT_CTRL)
+            self.turn_hold_curvature = math.copysign(new_mag, turn_candidate)
+          elif self.turn_hold_curvature * blinker_dir < 0.0:
+            # blinker flipped to the other side: turn intent changed
+            self.turn_hold_curvature = 0.0
+        if CC.latActive and self.turn_hold_curvature != 0.0:
+          hold_dir = math.copysign(1.0, self.turn_hold_curvature)
+          if new_desired_curvature * hold_dir < abs(self.turn_hold_curvature):
+            new_desired_curvature = self.turn_hold_curvature
 
-    # Turn-initiation lead (see TURN_LEAD_*). Applied AFTER the hold block so the
-    # ratchet/handoff only ever see the raw model action; pure max-magnitude, so it can
-    # never reduce or oppose the model. Lane changes are excluded: that blinker's plan
-    # bend is not a turn. The model-oppose veto is defense-in-depth for the fade-in
-    # edge: a model actively steering against the blinker is correcting something the
-    # lead must not fight (see the constants comment for the 2026-07-19 failures).
-    lateral_control_mode = self.sm['carOutput'].actuatorsOutput.lateralControlMode
-    if (turn_lead_allowed(self.CP.brand, lateral_control_mode) and
-        CC.latActive and blinker_dir != 0.0 and
-        model_v2.meta.laneChangeState == LaneChangeState.off and
-        TURN_LEAD_MIN_SPEED <= CS.vEgo < TURN_LEAD_MAX_SPEED and
-        new_desired_curvature * blinker_dir > -TURN_LEAD_MODEL_OPPOSE):
-      d_near = max(min(TURN_LEAD_T * CS.vEgo, TURN_LEAD_MAX_M), TURN_LEAD_MIN_M)
-      stopping_short = CS.aEgo < TURN_LEAD_DECEL_GATE and \
-          CS.vEgo ** 2 / (2.0 * -CS.aEgo) < TURN_LEAD_STOP_MARGIN * d_near
-      lead_curvature = 0.0 if stopping_short else _plan_dual_probe(model_v2, d_near, d_near + 3.0) * TURN_LEAD_SCALE
-      lead_curvature = max(min(lead_curvature, TURN_LEAD_CAP), -TURN_LEAD_CAP)
-      if lead_curvature * blinker_dir > 0.0:
-        speed_w = min(max((CS.vEgo - TURN_LEAD_MIN_SPEED) / (TURN_LEAD_FULL_SPEED - TURN_LEAD_MIN_SPEED), 0.0), 1.0)
-        engaged_ratio = abs(self.curvature) / abs(lead_curvature)
-        engage_w = min(max((1.0 - engaged_ratio) / (1.0 - TURN_LEAD_ENGAGED_FRAC), 0.0), 1.0)
-        lead_curvature *= speed_w * engage_w
-        if lead_curvature * blinker_dir > max(new_desired_curvature * blinker_dir, 0.0):
-          new_desired_curvature = lead_curvature
-          # Capture the applied lead into the hold (rate-limited like any moving-speed
-          # ratchet) so decelerating through the fade floor keeps the initiation
-          # progress: without this, braking mid-wind dumped the lead's demand back to
-          # the still-small action and visibly unwound the wheel 50->15 deg before the
-          # standstill pre-wind had to redo the work (0000087c seg 6 first left).
-          if CS.vEgo < CURVATURE_HOLD_RELEASE_SPEED and not self.turn_hold_done and \
-             lead_curvature * blinker_dir > abs(self.turn_hold_curvature):
-            held_mag = min(lead_curvature * blinker_dir, abs(self.turn_hold_curvature) + CURVATURE_HOLD_RATCHET_RATE * DT_CTRL)
-            self.turn_hold_curvature = math.copysign(held_mag, lead_curvature)
+      # Turn-initiation lead (see TURN_LEAD_*). Applied AFTER the hold block so the
+      # ratchet/handoff only ever see the raw model action; pure max-magnitude, so it can
+      # never reduce or oppose the model. Lane changes are excluded: that blinker's plan
+      # bend is not a turn. The model-oppose veto is defense-in-depth for the fade-in
+      # edge: a model actively steering against the blinker is correcting something the
+      # lead must not fight (see the constants comment for the 2026-07-19 failures).
+      lateral_control_mode = self.sm['carOutput'].actuatorsOutput.lateralControlMode
+      if (turn_lead_allowed(self.CP.brand, lateral_control_mode) and
+          CC.latActive and blinker_dir != 0.0 and
+          model_v2.meta.laneChangeState == LaneChangeState.off and
+          TURN_LEAD_MIN_SPEED <= CS.vEgo < TURN_LEAD_MAX_SPEED and
+          new_desired_curvature * blinker_dir > -TURN_LEAD_MODEL_OPPOSE):
+        d_near = max(min(TURN_LEAD_T * CS.vEgo, TURN_LEAD_MAX_M), TURN_LEAD_MIN_M)
+        stopping_short = CS.aEgo < TURN_LEAD_DECEL_GATE and \
+            CS.vEgo ** 2 / (2.0 * -CS.aEgo) < TURN_LEAD_STOP_MARGIN * d_near
+        lead_curvature = 0.0 if stopping_short else _plan_dual_probe(model_v2, d_near, d_near + 3.0) * TURN_LEAD_SCALE
+        lead_curvature = max(min(lead_curvature, TURN_LEAD_CAP), -TURN_LEAD_CAP)
+        if lead_curvature * blinker_dir > 0.0:
+          speed_w = min(max((CS.vEgo - TURN_LEAD_MIN_SPEED) / (TURN_LEAD_FULL_SPEED - TURN_LEAD_MIN_SPEED), 0.0), 1.0)
+          engaged_ratio = abs(self.curvature) / abs(lead_curvature)
+          engage_w = min(max((1.0 - engaged_ratio) / (1.0 - TURN_LEAD_ENGAGED_FRAC), 0.0), 1.0)
+          lead_curvature *= speed_w * engage_w
+          if lead_curvature * blinker_dir > max(new_desired_curvature * blinker_dir, 0.0):
+            new_desired_curvature = lead_curvature
+            # Capture the applied lead into the hold (rate-limited like any moving-speed
+            # ratchet) so decelerating through the fade floor keeps the initiation
+            # progress: without this, braking mid-wind dumped the lead's demand back to
+            # the still-small action and visibly unwound the wheel 50->15 deg before the
+            # standstill pre-wind had to redo the work (0000087c seg 6 first left).
+            if CS.vEgo < CURVATURE_HOLD_RELEASE_SPEED and not self.turn_hold_done and \
+               lead_curvature * blinker_dir > abs(self.turn_hold_curvature):
+              held_mag = min(lead_curvature * blinker_dir, abs(self.turn_hold_curvature) + CURVATURE_HOLD_RATCHET_RATE * DT_CTRL)
+              self.turn_hold_curvature = math.copysign(held_mag, lead_curvature)
 
-    new_desired_curvature = self.lane_centering.update(
-      new_desired_curvature, model_v2, CS.vEgo,
-      self.starpilot_toggles.lane_centering,
-      self.starpilot_toggles.lane_center_offset,
-      self.starpilot_toggles.lane_centering_e2e_authority,
-      CC.latActive,
-      bool(self.sm.all_checks(['modelV2'])),
-      self.starpilot_toggles.lane_centering_pause_on_signal,
-      bool(CS.leftBlinker or CS.rightBlinker),
-      bool(CS.steeringPressed))
+      new_desired_curvature = self.lane_centering.update(
+        new_desired_curvature, model_v2, CS.vEgo,
+        self.starpilot_toggles.lane_centering,
+        self.starpilot_toggles.lane_center_offset,
+        self.starpilot_toggles.lane_centering_e2e_authority,
+        CC.latActive,
+        bool(self.sm.all_checks(['modelV2'])),
+        self.starpilot_toggles.lane_centering_pause_on_signal,
+        bool(CS.leftBlinker or CS.rightBlinker),
+        bool(CS.steeringPressed))
 
-    if self.genesis_highway_stabilizer is not None:
-      stabilize_genesis = (CC.latActive and isinstance(self.LaC, LatControlTorque) and
-                           not CS.steeringPressed and not CS.leftBlinker and not CS.rightBlinker and
-                           not self.starpilot_toggles.lane_centering and
-                           model_v2.meta.laneChangeState == LaneChangeState.off and
-                           self.sm.all_checks(['modelV2']))
-      new_desired_curvature = self.genesis_highway_stabilizer.update(
-        new_desired_curvature, CS.vEgo, stabilize_genesis, DT_CTRL)
+      if self.genesis_highway_stabilizer is not None:
+        stabilize_genesis = (CC.latActive and isinstance(self.LaC, LatControlTorque) and
+                             not CS.steeringPressed and not CS.leftBlinker and not CS.rightBlinker and
+                             not self.starpilot_toggles.lane_centering and
+                             model_v2.meta.laneChangeState == LaneChangeState.off and
+                             self.sm.all_checks(['modelV2']))
+        new_desired_curvature = self.genesis_highway_stabilizer.update(
+          new_desired_curvature, CS.vEgo, stabilize_genesis, DT_CTRL)
 
-    jerk_factor = 1.0
-    if self.starpilot_toggles.lane_change_pace < 10:
-      set_jerk = self.starpilot_toggles.lane_change_jerk_factor
-      in_lane_change = model_v2.meta.laneChangeState in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing) \
-          and CS.vEgo >= self.starpilot_toggles.minimum_lane_change_speed
-      # Hold the tight jerk limit for the whole maneuver, then taper back to stock so the
-      # model's recenter step and mid-change corrections stay shaped instead of passing
-      # through a mostly-relaxed clamp. Only the jerk (curvature rate) is tightened: capping
-      # lat accel strangles the end-of-maneuver arrest and lets the car glide past the new
-      # lane center before it can build enough counter-curvature.
-      if in_lane_change:
-        self.lc_smooth_release = LANE_CHANGE_SMOOTH_RELEASE_T
-        if self.lc_entry_sign == 0.0 and abs(new_desired_curvature - self.desired_curvature) > 2e-4:
-          self.lc_entry_sign = math.copysign(1.0, new_desired_curvature - self.desired_curvature)
-      else:
-        self.lc_smooth_release = max(self.lc_smooth_release - DT_CTRL, 0.0)
-        if self.lc_smooth_release <= 0.0:
-          self.lc_entry_sign = 0.0
-      if self.lc_smooth_release > 0.0:
-        release = 1.0 - self.lc_smooth_release / LANE_CHANGE_SMOOTH_RELEASE_T  # 0 in maneuver → 1 after
-        jerk_factor = set_jerk + (1.0 - set_jerk) * release
-        step = new_desired_curvature - self.desired_curvature
-        model_unwinding = self.lc_entry_sign != 0.0 and abs(step) > LANE_CHANGE_ARREST_GAP_DEADBAND and \
-            math.copysign(1.0, step) == -self.lc_entry_sign
-        if model_unwinding:
-          v_lim = max(CS.vEgo, 1.0)
-          gap = max(abs(step) - LANE_CHANGE_ARREST_GAP_DEADBAND, 0.0)
-          jf_gap = (gap / LANE_CHANGE_ARREST_PURSUIT_TAU) * v_lim ** 2 / MAX_LATERAL_JERK
-          arrest_cap = LANE_CHANGE_ARREST_JERK_FLOOR + (1.0 - LANE_CHANGE_ARREST_JERK_FLOOR) * release
-          jerk_factor = max(jerk_factor, min(arrest_cap, jerk_factor + jf_gap))
-        if jerk_factor > self.lc_arrest_jerk_factor:
-          rise_alpha = 1.0 - math.exp(-DT_CTRL / LANE_CHANGE_ARREST_RISE_TAU)
-          jerk_factor = self.lc_arrest_jerk_factor + rise_alpha * (jerk_factor - self.lc_arrest_jerk_factor)
-      self.lc_arrest_jerk_factor = jerk_factor
+      jerk_factor = 1.0
+      if self.starpilot_toggles.lane_change_pace < 10:
+        set_jerk = self.starpilot_toggles.lane_change_jerk_factor
+        in_lane_change = model_v2.meta.laneChangeState in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing) \
+            and CS.vEgo >= self.starpilot_toggles.minimum_lane_change_speed
+        # Hold the tight jerk limit for the whole maneuver, then taper back to stock so the
+        # model's recenter step and mid-change corrections stay shaped instead of passing
+        # through a mostly-relaxed clamp. Only the jerk (curvature rate) is tightened: capping
+        # lat accel strangles the end-of-maneuver arrest and lets the car glide past the new
+        # lane center before it can build enough counter-curvature.
+        if in_lane_change:
+          self.lc_smooth_release = LANE_CHANGE_SMOOTH_RELEASE_T
+          if self.lc_entry_sign == 0.0 and abs(new_desired_curvature - self.desired_curvature) > 2e-4:
+            self.lc_entry_sign = math.copysign(1.0, new_desired_curvature - self.desired_curvature)
+        else:
+          self.lc_smooth_release = max(self.lc_smooth_release - DT_CTRL, 0.0)
+          if self.lc_smooth_release <= 0.0:
+            self.lc_entry_sign = 0.0
+        if self.lc_smooth_release > 0.0:
+          release = 1.0 - self.lc_smooth_release / LANE_CHANGE_SMOOTH_RELEASE_T  # 0 in maneuver → 1 after
+          jerk_factor = set_jerk + (1.0 - set_jerk) * release
+          step = new_desired_curvature - self.desired_curvature
+          model_unwinding = self.lc_entry_sign != 0.0 and abs(step) > LANE_CHANGE_ARREST_GAP_DEADBAND and \
+              math.copysign(1.0, step) == -self.lc_entry_sign
+          if model_unwinding:
+            v_lim = max(CS.vEgo, 1.0)
+            gap = max(abs(step) - LANE_CHANGE_ARREST_GAP_DEADBAND, 0.0)
+            jf_gap = (gap / LANE_CHANGE_ARREST_PURSUIT_TAU) * v_lim ** 2 / MAX_LATERAL_JERK
+            arrest_cap = LANE_CHANGE_ARREST_JERK_FLOOR + (1.0 - LANE_CHANGE_ARREST_JERK_FLOOR) * release
+            jerk_factor = max(jerk_factor, min(arrest_cap, jerk_factor + jf_gap))
+          if jerk_factor > self.lc_arrest_jerk_factor:
+            rise_alpha = 1.0 - math.exp(-DT_CTRL / LANE_CHANGE_ARREST_RISE_TAU)
+            jerk_factor = self.lc_arrest_jerk_factor + rise_alpha * (jerk_factor - self.lc_arrest_jerk_factor)
+        self.lc_arrest_jerk_factor = jerk_factor
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
                                                                jerk_factor)
@@ -887,7 +947,17 @@ class Controls:
     hudControl.leftLaneVisible = bool(left_prob > 0.4)
     hudControl.rightLaneVisible = bool(right_prob > 0.4)
 
-    if self.sm.valid['driverAssistance']:
+    if self.lka_armed_last:
+      hudControl.leftLaneVisible = bool(self.lka.left_line_state > 0)
+      hudControl.rightLaneVisible = bool(self.lka.right_line_state > 0)
+      hudControl.leftLaneDepart = bool(self.lka.left_line_state == 3)
+      hudControl.rightLaneDepart = bool(self.lka.right_line_state == 3)
+      if hudControl.visualAlert == car.CarControl.HUDControl.VisualAlert.none:
+        if self.lka.alert == LaneKeepAlert.KEEP_HANDS_ON_WHEEL:
+          hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.steerRequired
+        elif self.lka.alert == LaneKeepAlert.EMERGENCY_DEPARTURE:
+          hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.ldw
+    elif self.sm.valid['driverAssistance']:
       hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
       hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
       if (hudControl.leftLaneDepart or hudControl.rightLaneDepart) and hudControl.visualAlert == car.CarControl.HUDControl.VisualAlert.none:
@@ -939,10 +1009,20 @@ class Controls:
 
     self.pm.send('controlsState', dat)
 
+    debug_dat = messaging.new_message('starpilotLateralState')
+    debug_dat.valid = CS.canValid
     if hasattr(self.LaC, 'starpilot_lateral_state'):
-      debug_dat = messaging.new_message('starpilotLateralState')
       debug_dat.starpilotLateralState = self.LaC.starpilot_lateral_state
-      self.pm.send('starpilotLateralState', debug_dat)
+    sp_lat = debug_dat.starpilotLateralState
+    sp_lat.lkaArmed = bool(self.lka_armed_last)
+    sp_lat.lkaActive = bool(self.lka.active)
+    sp_lat.lkaRdmActive = bool(self.lka.rdm_active)
+    sp_lat.lkaLeftLineState = int(self.lka.left_line_state)
+    sp_lat.lkaRightLineState = int(self.lka.right_line_state)
+    sp_lat.lkaAlert = int(self.lka.alert)
+    sp_lat.lkaGradientOpacity = float(self.lka.gradient_opacity)
+    sp_lat.lkaGradientWidth = float(self.lka.gradient_width)
+    self.pm.send('starpilotLateralState', debug_dat)
 
     # carControl
     cc_send = messaging.new_message('carControl')

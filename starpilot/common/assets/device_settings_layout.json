@@ -508,7 +508,7 @@
         "picker_description": "Boundary nudges when drifting out of lane.",
         "data_type": "bool",
         "ui_type": "toggle",
-        "default": true,
+        "default": false,
         "is_parent_toggle": true,
         "settings_tier": "simple"
       },

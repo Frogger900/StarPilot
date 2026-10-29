@@ -1,15 +1,18 @@
+import math
 from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from opendbc.car.subaru.interface import CarInterface
+from opendbc.car.subaru.values import CAR as SUBARU_CAR
+from opendbc.car.vehicle_model import VehicleModel
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.lanekeep import (
   LaneKeepController,
   LaneKeepMode,
   LaneKeepSensitivity,
   LaneKeepAlert,
-  DEFAULT_VEHICLE_HALF_WIDTH,
-  DEFAULT_CAMERA_OFFSET,
+  extract_lane_keep_visual_state,
 )
 
 
@@ -112,8 +115,7 @@ def test_speed_hysteresis():
   assert lka._speed_armed
   assert lka.left_line_state == 1  # Solid white when armed
 
-  # Dip slightly below min activation speed but above hysteresis floor (23 mph)
-  # Floor is 25 - 4 = 21 mph
+  # Dip slightly below min activation speed but above hysteresis floor (23 mph > 21 mph)
   lka.update(
     model,
     v_ego=23.0 * CV.MPH_TO_MS,
@@ -164,16 +166,19 @@ def test_passive_in_lane_cruising():
   assert lka.gradient_opacity == 0.0
 
 
-def test_drift_left_nudge_and_amber_line():
+def test_drift_left_nudge_and_vehicle_model_right_steer_sign():
   lka = LaneKeepController()
-  # w_half=0.92, camera_offset=0.04. Left tire edge at left_y - 0.96.
-  # At left_y = -1.10, d_left = 1.10 - 0.96 = 0.14m (< 0.22m normal threshold)
+  CP = CarInterface.get_non_essential_params(SUBARU_CAR.SUBARU_LEGACY_2025)
+  VM = VehicleModel(CP)
+  v_ego = 30.0 * CV.MPH_TO_MS
+
+  # w_half=0.92, camera_offset=0.04. At left_y = -1.10, d_left = 1.10 - 0.96 = 0.14m (< 0.22m normal threshold)
   model = _make_model(left_y=-1.10, right_y=2.5)
 
   for _ in range(20):
     lka.update(
       model,
-      v_ego=30.0 * CV.MPH_TO_MS,
+      v_ego=v_ego,
       steering_angle_deg=0.0,
       steering_torque=0.0,
       left_blinker=False,
@@ -182,29 +187,32 @@ def test_drift_left_nudge_and_amber_line():
     )
 
   assert lka.active
-  # Negative curvature turns steering wheel right away from left boundary
-  assert lka.desired_curvature < 0.0
-  # Lateral accel capped to comfortable ceiling <= 1.1 m/s^2
+  # Openpilot convention: +desired_curvature (> 0) turns RIGHT; LatControlAngle (latcontrol_angle.py:68)
+  # passes -desired_curvature to VehicleModel, yielding negative steeringAngleDeg (< 0, clockwise / right turn on Subaru).
+  assert lka.desired_curvature > 0.0
+  angle_steers_des = math.degrees(VM.get_steer_from_curvature(-lka.desired_curvature, v_ego, 0.0))
+  assert angle_steers_des < 0.0
   assert abs(lka.desired_lat_accel) <= 1.15
-  # Left line is amber, right line is solid white
   assert lka.left_line_state == 3
   assert lka.right_line_state == 1
-  # UI gradient is active, amber (not red)
   assert lka.gradient_opacity > 0.0
   assert not lka.is_red_gradient
   assert lka.alert == LaneKeepAlert.NONE
 
 
-def test_drift_right_nudge_and_amber_line():
+def test_drift_right_nudge_and_vehicle_model_left_steer_sign():
   lka = LaneKeepController()
-  # Right tire edge at right_y - 0.88.
+  CP = CarInterface.get_non_essential_params(SUBARU_CAR.SUBARU_LEGACY_2025)
+  VM = VehicleModel(CP)
+  v_ego = 30.0 * CV.MPH_TO_MS
+
   # At right_y = 1.05, d_right = 1.05 - 0.88 = 0.17m (< 0.22m normal threshold)
   model = _make_model(left_y=-2.5, right_y=1.05)
 
   for _ in range(20):
     lka.update(
       model,
-      v_ego=30.0 * CV.MPH_TO_MS,
+      v_ego=v_ego,
       steering_angle_deg=0.0,
       steering_torque=0.0,
       left_blinker=False,
@@ -213,14 +221,46 @@ def test_drift_right_nudge_and_amber_line():
     )
 
   assert lka.active
-  # Positive curvature turns steering wheel left away from right boundary
-  assert lka.desired_curvature > 0.0
+  # Openpilot convention: -desired_curvature (< 0) turns LEFT; LatControlAngle (latcontrol_angle.py:68)
+  # passes -desired_curvature to VehicleModel, yielding positive steeringAngleDeg (> 0, counter-clockwise / left turn on Subaru).
+  assert lka.desired_curvature < 0.0
+  angle_steers_des = math.degrees(VM.get_steer_from_curvature(-lka.desired_curvature, v_ego, 0.0))
+  assert angle_steers_des > 0.0
   assert abs(lka.desired_lat_accel) <= 1.15
-  # Left line is white, right line is amber
   assert lka.left_line_state == 1
   assert lka.right_line_state == 3
   assert lka.gradient_opacity > 0.0
   assert not lka.is_red_gradient
+
+
+def test_inside_curve_apex_cut_buffer():
+  v_ego = 35.0 * CV.MPH_TO_MS
+
+  # 1. Sweeping LEFT curve (desired_curvature = -0.005 < -0.001):
+  # Inside left boundary threshold shrinks by 0.25m (0.22 -> 0.00m), so d_left = 0.14m does NOT nuisance-nudge
+  lka_left_curve = LaneKeepController()
+  model_left_apex = _make_model(left_y=-1.10, right_y=2.5, desired_curvature=-0.005)
+  for _ in range(15):
+    lka_left_curve.update(model_left_apex, v_ego=v_ego, steering_angle_deg=8.0, steering_torque=0.0)
+  assert not lka_left_curve.active
+  assert lka_left_curve.left_line_state == 1
+
+  # Outside right boundary on the same left curve retains full 0.22m margin, so d_right = 0.17m DOES nudge left!
+  model_left_outside = _make_model(left_y=-2.5, right_y=1.05, desired_curvature=-0.005)
+  for _ in range(15):
+    lka_left_curve.update(model_left_outside, v_ego=v_ego, steering_angle_deg=8.0, steering_torque=0.0)
+  assert lka_left_curve.active
+  assert lka_left_curve.desired_curvature < 0.0
+  assert lka_left_curve.right_line_state == 3
+
+  # 2. Sweeping RIGHT curve (desired_curvature = +0.005 > +0.001):
+  # Inside right boundary threshold shrinks by 0.25m, so d_right = 0.17m does NOT nuisance-nudge
+  lka_right_curve = LaneKeepController()
+  model_right_apex = _make_model(left_y=-2.5, right_y=1.05, desired_curvature=0.005)
+  for _ in range(15):
+    lka_right_curve.update(model_right_apex, v_ego=v_ego, steering_angle_deg=-8.0, steering_torque=0.0)
+  assert not lka_right_curve.active
+  assert lka_right_curve.right_line_state == 1
 
 
 def test_cornering_and_blinker_gates():
@@ -240,7 +280,6 @@ def test_cornering_and_blinker_gates():
   assert lka.left_line_state == 0
   assert lka.right_line_state == 0
 
-  # Reset
   lka.reset()
 
   # 2. Left Blinker Gate: Left line turns off, nudge suppressed
@@ -272,7 +311,7 @@ def test_driver_override():
     right_blinker=False,
     lat_active=False,
   )
-  assert lka.desired_curvature < 0.0
+  assert lka.desired_curvature > 0.0
 
   # Apply driver torque > 0.5 Nm
   for _ in range(50):
@@ -292,7 +331,6 @@ def test_driver_override():
 def test_anti_lazy_timeout_progression():
   lka = LaneKeepController()
   model = _make_model(left_y=-1.10, right_y=2.5)
-
   dt = 0.01  # 100 Hz
 
   # 0 to 7 seconds: Silent nudge
@@ -302,9 +340,6 @@ def test_anti_lazy_timeout_progression():
       v_ego=30.0 * CV.MPH_TO_MS,
       steering_angle_deg=0.0,
       steering_torque=0.0,
-      left_blinker=False,
-      right_blinker=False,
-      lat_active=False,
       dt=dt,
     )
   assert lka.alert == LaneKeepAlert.NONE
@@ -317,41 +352,34 @@ def test_anti_lazy_timeout_progression():
       v_ego=30.0 * CV.MPH_TO_MS,
       steering_angle_deg=0.0,
       steering_torque=0.0,
-      left_blinker=False,
-      right_blinker=False,
-      lat_active=False,
       dt=dt,
     )
   assert lka.alert == LaneKeepAlert.KEEP_HANDS_ON_WHEEL
   assert not lka._lockout
 
-  # >= 10 seconds: Stage 3 Lockout & Cutoff
+  # >= 10 seconds: Stage 3 Lockout & Cutoff -> EMERGENCY_DEPARTURE persists throughout lockout
   for _ in range(200):  # total 10.5s
     lka.update(
       model,
       v_ego=30.0 * CV.MPH_TO_MS,
       steering_angle_deg=0.0,
       steering_torque=0.0,
-      left_blinker=False,
-      right_blinker=False,
-      lat_active=False,
       dt=dt,
     )
   assert lka._lockout
-  assert lka.alert == LaneKeepAlert.KEEP_HANDS_ON_WHEEL
-  # S-curve decays curvature to 0 during lockout
+  assert lka.alert == LaneKeepAlert.EMERGENCY_DEPARTURE
+
+  # S-curve decays curvature to 0 during lockout while keeping EMERGENCY_DEPARTURE active
   for _ in range(100):
     lka.update(
       model,
       v_ego=30.0 * CV.MPH_TO_MS,
       steering_angle_deg=0.0,
       steering_torque=0.0,
-      left_blinker=False,
-      right_blinker=False,
-      lat_active=False,
       dt=dt,
     )
   assert abs(lka.desired_curvature) < 1e-3
+  assert lka.alert == LaneKeepAlert.EMERGENCY_DEPARTURE
 
   # Driver taps wheel (> 0.5 Nm) -> Lockout clears
   lka.update(
@@ -359,51 +387,55 @@ def test_anti_lazy_timeout_progression():
     v_ego=30.0 * CV.MPH_TO_MS,
     steering_angle_deg=0.0,
     steering_torque=0.7,
-    left_blinker=False,
-    right_blinker=False,
-    lat_active=False,
     dt=dt,
   )
   assert not lka._lockout
 
 
-def test_road_edge_mitigation_and_red_gradient():
+def test_road_edge_mitigation_ttc_amber_cluster_and_18s_authority():
   lka = LaneKeepController()
-  # Missing painted lines (prob 0.1), close road edge at -1.15m
-  model = _make_model(
-    left_y=-3.0,
-    right_y=3.0,
-    left_prob=0.1,
-    right_prob=0.1,
-    edge_left_y=-1.15,
-    edge_right_y=2.5,
-    edge_left_std=0.2,
-  )
+  v_ego = 30.0 * CV.MPH_TO_MS
 
-  for _ in range(20):
-    lka.update(
-      model,
-      v_ego=30.0 * CV.MPH_TO_MS,
-      steering_angle_deg=0.0,
-      steering_torque=0.0,
-      left_blinker=False,
-      right_blinker=False,
-      lat_active=False,
-    )
-
+  # 1. Proactive unstriped road-edge TTC trigger (missing painted lines, d_edge_left shrinking rapidly while > 0.32m)
+  m1 = _make_model(left_prob=0.1, right_prob=0.1, edge_left_y=-1.60, edge_right_y=2.5, edge_left_std=0.2)
+  m2 = _make_model(left_prob=0.1, right_prob=0.1, edge_left_y=-1.50, edge_right_y=2.5, edge_left_std=0.2)
+  lka.update(m1, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.10)
+  lka.update(m2, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.10)
   assert lka.active
   assert lka.rdm_active
   assert lka.is_red_gradient
-  assert lka.desired_curvature < 0.0  # Steers right away from grass/ditch
+  assert lka.left_line_state == 3  # Amber cluster line even on unstriped road!
+  assert lka.desired_curvature > 0.0  # Steers RIGHT away from left ditch
+
+  # 2. Close road edge sustained intervention: RDM keeps steering past 10s up to 18s ceiling (urgent alert at 15s)
+  lka.reset()
+  model_edge = _make_model(
+    left_y=-3.0, right_y=3.0, left_prob=0.1, right_prob=0.1,
+    edge_left_y=-1.15, edge_right_y=2.5, edge_left_std=0.2,
+  )
+  for _ in range(1200):  # 12.0s (> 10s LKA cutoff, < 15s RDM emergency warning)
+    lka.update(model_edge, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01)
+  assert not lka._lockout
+  assert lka.active
+  assert lka.desired_curvature > 0.0
+  assert lka.alert == LaneKeepAlert.KEEP_HANDS_ON_WHEEL
+
+  for _ in range(350):  # 15.5s (>= 15s RDM emergency warning, still actively steering!)
+    lka.update(model_edge, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01)
+  assert not lka._lockout
+  assert lka.active
+  assert lka.alert == LaneKeepAlert.EMERGENCY_DEPARTURE
+
+  for _ in range(300):  # 18.5s (>= 18s RDM lockout ceiling)
+    lka.update(model_edge, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01)
+  assert lka._lockout
+  assert lka.alert == LaneKeepAlert.EMERGENCY_DEPARTURE
 
 
 def test_sensitivity_presets():
   lka = LaneKeepController()
   model = _make_model(left_y=-1.25, right_y=1.8)
-  # d_left = 1.25 - 0.96 = 0.29m.
-  # At Late (thresh 0.00m) -> should NOT trigger
-  # At Normal (thresh 0.22m) -> should NOT trigger
-  # At Proactive (thresh 0.38m) -> SHOULD trigger
+  # d_left = 1.25 - 0.96 = 0.29m: triggers only on PROACTIVE (0.38m)
 
   # 1. Late
   lka.update(
@@ -411,9 +443,6 @@ def test_sensitivity_presets():
     v_ego=30.0 * CV.MPH_TO_MS,
     steering_angle_deg=0.0,
     steering_torque=0.0,
-    left_blinker=False,
-    right_blinker=False,
-    lat_active=False,
     sensitivity=LaneKeepSensitivity.LATE,
   )
   assert lka.left_line_state == 1
@@ -425,9 +454,6 @@ def test_sensitivity_presets():
     v_ego=30.0 * CV.MPH_TO_MS,
     steering_angle_deg=0.0,
     steering_torque=0.0,
-    left_blinker=False,
-    right_blinker=False,
-    lat_active=False,
     sensitivity=LaneKeepSensitivity.NORMAL,
   )
   assert lka.left_line_state == 1
@@ -440,40 +466,48 @@ def test_sensitivity_presets():
       v_ego=30.0 * CV.MPH_TO_MS,
       steering_angle_deg=0.0,
       steering_torque=0.0,
-      left_blinker=False,
-      right_blinker=False,
-      lat_active=False,
       sensitivity=LaneKeepSensitivity.PROACTIVE,
     )
-  assert lka.left_line_state == 3  # Amber triggered
+  assert lka.left_line_state == 3
   assert lka.gradient_width == 0.45
 
 
-def test_get_lane_keep_visual_state():
-  from openpilot.selfdrive.controls.lib.lanekeep import get_lane_keep_visual_state
-
-  model_center = _make_model(left_y=-1.8, right_y=1.8)
-  model_left = _make_model(left_y=-1.10, right_y=2.5)
-  toggles = {"lane_keep_assist": True, "lane_keep_mode": 2, "lane_keep_sensitivity": 1}
-
-  # 1. Passive centered: no nudge
-  left, right, is_red, opacity, width = get_lane_keep_visual_state(
-    model_center, 30.0 * CV.MPH_TO_MS, 0.0, 0.0, False, False, False, toggles
+def test_extract_lane_keep_visual_state():
+  # 1. None or disarmed -> inactive
+  assert extract_lane_keep_visual_state(None) == (False, False, False, 0.0, 0.30)
+  assert extract_lane_keep_visual_state(SimpleNamespace(lkaArmed=False, lkaLeftLineState=3)) == (
+    False, False, False, 0.0, 0.30
   )
-  assert not left and not right and not is_red
 
-  # 2. Centering active (MADS/AOL engaged): yields completely
-  left, right, is_red, opacity, width = get_lane_keep_visual_state(
-    model_left, 30.0 * CV.MPH_TO_MS, 0.0, 0.0, False, False, True, toggles
+  # 2. Armed passive standby -> no ribbon
+  passive = SimpleNamespace(
+    lkaArmed=True,
+    lkaLeftLineState=1,
+    lkaRightLineState=1,
+    lkaRdmActive=False,
+    lkaGradientOpacity=0.0,
+    lkaGradientWidth=0.30,
   )
-  assert not left and not right
+  assert extract_lane_keep_visual_state(passive) == (False, False, False, 0.0, 0.30)
 
-  # 3. Drift left in manual mode: triggers amber left nudge
-  for _ in range(15):
-    left, right, is_red, opacity, width = get_lane_keep_visual_state(
-      model_left, 30.0 * CV.MPH_TO_MS, 0.0, 0.0, False, False, False, toggles
-    )
-  assert left and not right
-  assert not is_red  # Amber for painted line
-  assert opacity > 0.0
-  assert width == 0.30
+  # 3. Left painted-line nudge -> Amber ribbon
+  left_nudge = SimpleNamespace(
+    lkaArmed=True,
+    lkaLeftLineState=3,
+    lkaRightLineState=1,
+    lkaRdmActive=False,
+    lkaGradientOpacity=0.72,
+    lkaGradientWidth=0.30,
+  )
+  assert extract_lane_keep_visual_state(left_nudge) == (True, False, False, pytest.approx(0.72), pytest.approx(0.30))
+
+  # 4. Right road-edge RDM nudge (Proactive width) -> Neon Red ribbon with 0.45m width
+  right_rdm = SimpleNamespace(
+    lkaArmed=True,
+    lkaLeftLineState=0,
+    lkaRightLineState=3,
+    lkaRdmActive=True,
+    lkaGradientOpacity=0.95,
+    lkaGradientWidth=0.45,
+  )
+  assert extract_lane_keep_visual_state(right_rdm) == (False, True, True, pytest.approx(0.95), pytest.approx(0.45))

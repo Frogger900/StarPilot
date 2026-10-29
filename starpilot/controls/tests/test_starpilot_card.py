@@ -70,6 +70,7 @@ def make_toggles(**overrides):
     "always_on_lateral_lkas": False,
     "always_on_lateral_main": False,
     "always_on_lateral_pause_speed": 0.0,
+    "lane_keep_assist": False,
     "tesla_aol_disengage_on_brake": False,
     "bookmark_via_cancel": False,
     "bookmark_via_cancel_long": False,
@@ -1962,3 +1963,204 @@ def test_favorite_traffic_mode_action_is_consumed_when_not_active(monkeypatch, t
 
   assert card.traffic_mode_enabled is False
   assert card._favorite_traffic_mode_counter == 1
+
+
+def test_subaru_orthogonal_lka_and_mads_across_all_four_acc_quadrants(monkeypatch, tmp_path):
+  monkeypatch.setattr(spc, "Params", FakeParams)
+  monkeypatch.setattr(spc, "ERROR_LOGS_PATH", tmp_path)
+
+  cp = SimpleNamespace(brand="subaru", carFingerprint="SUBARU_LEGACY_2025", flags=0)
+  fp = SimpleNamespace(alternativeExperience=spc.ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL)
+  card = spc.StarPilotCard(cp, fp)
+  sm = make_sm()
+  toggles = make_toggles(
+    always_on_lateral=True,
+    always_on_lateral_main=True,
+    always_on_lateral_pause_speed=5.0,
+    lane_keep_assist=True,
+    lkas_allowed_for_aol=True,
+    pause_lateral_via_lkas=True,  # Must not invert orthogonal pauseLateral ownership
+  )
+  out = SimpleNamespace(distancePressed=False)
+
+  # 0. Disarmed (Cruise_On == 0): neither MADS nor LKA armed; pressing Lane Centering does nothing
+  ret = card.update(
+    make_car_state(available=False, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is False
+  assert ret.pauseLateral is False
+
+  # 1. Quadrant 1 (ACC OFF + MADS/Centering, default initial preference True on Cruise_On: 0 -> 1)
+  ret = card.update(make_car_state(available=True, enabled=False), out, sm, toggles)
+  assert ret.alwaysOnLateralEnabled is True
+  assert ret.lkaArmed is False
+  assert ret.pauseLateral is False
+
+  # 2. Quadrant 2 (ACC OFF + LKA-Only via physical Lane Centering button)
+  ret = card.update(
+    make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+  assert ret.pauseLateral is True
+  assert card.params.get_bool("LastLateralModeCentering") is False
+
+  # Braking in LKA-Only mode keeps LKA armed (does not pause below AOL pause speed)
+  braking_cs = make_car_state(available=True, enabled=False, brake_pressed=True)
+  braking_cs.vEgo = 3.0
+  ret = card.update(braking_cs, out, sm, toggles)
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+
+  # 3. Quadrant 3 (ACC ON + LKA-Only: pressing SET engages ACC while keeping LKA-Only steering)
+  sm["selfdriveState"].active = True
+  sm["carControl"].longActive = False  # Stock EyeSight PCM ACC
+  ret = card.update(make_car_state(available=True, enabled=True), out, sm, toggles)
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+  assert ret.pauseLateral is True
+
+  # 4. Quadrant 4 (ACC ON + Continuous Centering: pressing Lane Centering while ACC is ON engages full steering)
+  ret = card.update(
+    make_car_state(available=True, enabled=True, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is True
+  assert ret.lkaArmed is False
+  assert ret.pauseLateral is False
+  assert card.params.get_bool("LastLateralModeCentering") is True
+
+  # 5. Canceling ACC (first Main Cruise press or brake) preserves the active lateral mode
+  # 5a. Cancel ACC from Continuous Centering -> stays in MADS
+  sm["selfdriveState"].active = False
+  ret = card.update(make_car_state(available=True, enabled=False), out, sm, toggles)
+  assert ret.alwaysOnLateralEnabled is True
+  assert ret.lkaArmed is False
+
+  # 5b. Switch to LKA-Only while ACC ON, then cancel ACC -> stays in LKA-Only
+  sm["selfdriveState"].active = True
+  ret = card.update(
+    make_car_state(available=True, enabled=True, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm, toggles,
+  )
+  assert ret.lkaArmed is True
+  assert ret.alwaysOnLateralEnabled is False
+
+  sm["selfdriveState"].active = False
+  ret = card.update(make_car_state(available=True, enabled=False), out, sm, toggles)
+  assert ret.lkaArmed is True
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.pauseLateral is True
+
+  # 6. Second Main Cruise press (Cruise_On: 1 -> 0) disarms BOTH steering functions completely
+  ret = card.update(make_car_state(available=False, enabled=False), out, sm, toggles)
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is False
+  assert ret.pauseLateral is False
+
+
+def test_subaru_persistent_last_lateral_mode_restored_across_drives(monkeypatch, tmp_path):
+  persistent_disk = {}
+
+  class SharedFakeParams(FakeParams):
+    def __init__(self, *args, memory=False, **kwargs):
+      super().__init__(*args, **kwargs)
+      if not memory:
+        self._store = persistent_disk
+
+  monkeypatch.setattr(spc, "Params", SharedFakeParams)
+  monkeypatch.setattr(spc, "ERROR_LOGS_PATH", tmp_path)
+
+  cp = SimpleNamespace(brand="subaru", carFingerprint="SUBARU_LEGACY_2025", flags=0)
+  fp = SimpleNamespace(alternativeExperience=spc.ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL)
+  toggles = make_toggles(
+    always_on_lateral=True,
+    always_on_lateral_main=True,
+    lane_keep_assist=True,
+    lkas_allowed_for_aol=True,
+  )
+  out = SimpleNamespace(distancePressed=False)
+
+  # Drive 1: Unset param defaults to MADS/Centering; driver toggles to LKA-Only and ends drive
+  drive1 = spc.StarPilotCard(cp, fp)
+  sm1 = make_sm()
+  ret = drive1.update(make_car_state(available=True, enabled=False), out, sm1, toggles)
+  assert ret.alwaysOnLateralEnabled is True
+  assert ret.lkaArmed is False
+
+  ret = drive1.update(
+    make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm1, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+  assert persistent_disk["LastLateralModeCentering"] is False
+
+  # Drive 2 (new ignition cycle): stays completely off until Main Cruise ON, then restores LKA-Only!
+  drive2 = spc.StarPilotCard(cp, fp)
+  sm2 = make_sm()
+  ret = drive2.update(make_car_state(available=False, enabled=False), out, sm2, toggles)
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is False
+
+  ret = drive2.update(make_car_state(available=True, enabled=False), out, sm2, toggles)
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+  assert ret.pauseLateral is True
+
+  # Driver switches back to MADS/Centering during Drive 2
+  ret = drive2.update(
+    make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+    out, sm2, toggles,
+  )
+  assert ret.alwaysOnLateralEnabled is True
+  assert ret.lkaArmed is False
+  assert persistent_disk["LastLateralModeCentering"] is True
+
+  # Drive 3 (next ignition cycle): first Main Cruise press restores MADS/Centering!
+  drive3 = spc.StarPilotCard(cp, fp)
+  sm3 = make_sm()
+  ret = drive3.update(make_car_state(available=True, enabled=False), out, sm3, toggles)
+  assert ret.alwaysOnLateralEnabled is True
+  assert ret.lkaArmed is False
+  assert ret.pauseLateral is False
+
+
+def test_lka_only_works_when_always_on_lateral_is_disabled_in_settings(monkeypatch, tmp_path):
+  monkeypatch.setattr(spc, "Params", FakeParams)
+  monkeypatch.setattr(spc, "ERROR_LOGS_PATH", tmp_path)
+
+  cp = SimpleNamespace(brand="subaru", carFingerprint="SUBARU_LEGACY_2025", flags=0)
+  fp = SimpleNamespace(alternativeExperience=0)
+  card = spc.StarPilotCard(cp, fp)
+  sm = make_sm()
+  toggles = make_toggles(
+    always_on_lateral=False,
+    lane_keep_assist=True,
+    lkas_allowed_for_aol=True,
+  )
+  out = SimpleNamespace(distancePressed=False)
+
+  ret = card.update(make_car_state(available=True, enabled=False), out, sm, toggles)
+  assert ret.alwaysOnLateralEnabled is False
+  assert ret.lkaArmed is True
+
+
+def test_driver_monitoring_policy_active_when_lka_armed():
+  from openpilot.selfdrive.monitoring.policy import starpilot_aol_enabled
+
+  class MockPolicySM(dict):
+    def __init__(self, sp_cs, alive=True, valid=True):
+      super().__init__(starpilotCarState=sp_cs)
+      self.data = {"starpilotCarState": sp_cs}
+      self.alive = {"starpilotCarState": alive}
+      self.valid = {"starpilotCarState": valid}
+
+  assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=False, lkaArmed=True))) is True
+  assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=True, lkaArmed=False))) is True
+  assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=False, lkaArmed=False))) is False
+  assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=False, lkaArmed=True), alive=False)) is False
+  assert starpilot_aol_enabled(MockPolicySM(SimpleNamespace(alwaysOnLateralEnabled=False, lkaArmed=True), valid=False)) is False

@@ -32,7 +32,8 @@ def starpilot_aol_enabled(sm):
     return False
 
   try:
-    return bool(sm[service].alwaysOnLateralEnabled)
+    sp_cs = sm[service]
+    return bool(sp_cs.alwaysOnLateralEnabled or getattr(sp_cs, 'lkaArmed', False))
   except (AttributeError, KeyError):
     return False
 

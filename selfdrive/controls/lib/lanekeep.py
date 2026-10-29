@@ -1,4 +1,3 @@
-import math
 import numpy as np
 from enum import IntEnum
 
@@ -33,7 +32,7 @@ MAX_LAT_ACCEL = 1.1                # m/s^2 gentle acceleration ceiling
 MAX_STEER_RATE_SCALE = 1.3         # +30% authority for emergency road edge mitigation
 OVERRIDE_TORQUE_THRESHOLD = 0.5    # Nm (light hand pressure yields assist)
 CORNERING_GATE_ANGLE_DEG = 45.0    # degrees (suppress assist during active turns)
-APEX_CUT_BUFFER_M = 0.25           # meters (expand buffer when clipping inside curve)
+APEX_CUT_BUFFER_M = 0.25           # meters (reduce trigger margin on inside curve apex)
 POST_BLINKER_COOLDOWN_S = 2.0      # seconds to wait after turn signal auto-cancels
 
 # S-Curve Smoothing Filter (100ms time constant)
@@ -63,6 +62,8 @@ class LaneKeepController:
     self._prev_curvature = 0.0
     self._prev_d_left = None
     self._prev_d_right = None
+    self._prev_d_edge_left = None
+    self._prev_d_edge_right = None
     self._prev_v_ego = 0.0
     self._intervention_timer = 0.0
     self._rdm_timer = 0.0
@@ -71,7 +72,7 @@ class LaneKeepController:
     self._blinker_cooldown_right = 0.0
     self._speed_armed = False
 
-  def reset(self):
+  def reset(self, full: bool = False):
     self.active = False
     self.rdm_active = False
     self.desired_curvature = 0.0
@@ -84,9 +85,15 @@ class LaneKeepController:
     self._prev_curvature = 0.0
     self._prev_d_left = None
     self._prev_d_right = None
+    self._prev_d_edge_left = None
+    self._prev_d_edge_right = None
     self._intervention_timer = 0.0
     self._rdm_timer = 0.0
     self._lockout = False
+    if full:
+      self._speed_armed = False
+      self._blinker_cooldown_left = 0.0
+      self._blinker_cooldown_right = 0.0
 
   def update(
     self,
@@ -105,6 +112,9 @@ class LaneKeepController:
   ):
     """
     Core LKA / RDM cycle executed at controls rate (100 Hz / DT_CTRL).
+    Openpilot curvature sign convention:
+      +curvature (> 0) = RIGHT turn (negative steeringAngleDeg)
+      -curvature (< 0) = LEFT turn  (positive steeringAngleDeg)
     """
     # 1. Master enable / mode check
     if mode == LaneKeepMode.OFF:
@@ -182,20 +192,26 @@ class LaneKeepController:
     d_edge_left = -edge_left_y - (self.w_half + self.camera_offset)
     d_edge_right = edge_right_y - (self.w_half - self.camera_offset)
 
-    # Lateral velocities (d_dot)
-    d_dot_left = (d_left - self._prev_d_left) / dt if self._prev_d_left is not None else 0.0
-    d_dot_right = (d_right - self._prev_d_right) / dt if self._prev_d_right is not None else 0.0
+    # Lateral velocities (d_dot < 0 means approaching boundary)
+    d_dot_left = (d_left - self._prev_d_left) / dt if self._prev_d_left is not None and dt > 0.0 else 0.0
+    d_dot_right = (d_right - self._prev_d_right) / dt if self._prev_d_right is not None and dt > 0.0 else 0.0
+    d_dot_edge_left = (d_edge_left - self._prev_d_edge_left) / dt if self._prev_d_edge_left is not None and dt > 0.0 else 0.0
+    d_dot_edge_right = (d_edge_right - self._prev_d_edge_right) / dt if self._prev_d_edge_right is not None and dt > 0.0 else 0.0
     self._prev_d_left = d_left
     self._prev_d_right = d_right
+    self._prev_d_edge_left = d_edge_left
+    self._prev_d_edge_right = d_edge_right
 
-    # Time-To-Cross (TTC)
-    ttc_left = d_left / abs(d_dot_left) if d_dot_left < -0.05 else 99.0
-    ttc_right = d_right / abs(d_dot_right) if d_dot_right < -0.05 else 99.0
+    # Time-To-Cross (TTC) for painted lines and road edges
+    ttc_left = max(0.0, d_left) / abs(d_dot_left) if d_dot_left < -0.05 else 99.0
+    ttc_right = max(0.0, d_right) / abs(d_dot_right) if d_dot_right < -0.05 else 99.0
+    ttc_edge_left = max(0.0, d_edge_left) / abs(d_dot_edge_left) if d_dot_edge_left < -0.05 else 99.0
+    ttc_edge_right = max(0.0, d_edge_right) / abs(d_dot_edge_right) if d_dot_edge_right < -0.05 else 99.0
 
-    # Curve Apex Smoothing (expand boundary on inside of curve)
+    # Curve Apex Allowance: reduce trigger margin on inside of curve (+road_curv = right curve, -road_curv = left curve)
     road_curv = float(model_v2.action.desiredCurvature) if hasattr(model_v2, "action") else 0.0
-    d_thresh_left = d_thresh + (APEX_CUT_BUFFER_M if road_curv > 0.001 else 0.0)
-    d_thresh_right = d_thresh + (APEX_CUT_BUFFER_M if road_curv < -0.001 else 0.0)
+    d_thresh_left = max(0.0, d_thresh - (APEX_CUT_BUFFER_M if road_curv < -0.001 else 0.0))
+    d_thresh_right = max(0.0, d_thresh - (APEX_CUT_BUFFER_M if road_curv > 0.001 else 0.0))
 
     # 8. Trigger Detection (Left vs. Right)
     trigger_left_line = (
@@ -219,14 +235,22 @@ class LaneKeepController:
       edge_left_std < 0.50 and
       not steer_suppressed and
       self._blinker_cooldown_left <= 0.0 and
-      (d_edge_left < d_edge_thresh or (d_left < 0.0 and d_edge_left < 0.50))
+      (
+        d_edge_left < d_edge_thresh or
+        ttc_edge_left < ttc_edge_thresh or
+        (left_line_visible and d_left < 0.0 and d_edge_left < 0.50)
+      )
     )
 
     trigger_rdm_right = (
       edge_right_std < 0.50 and
       not steer_suppressed and
       self._blinker_cooldown_right <= 0.0 and
-      (d_edge_right < d_edge_thresh or (d_right < 0.0 and d_edge_right < 0.50))
+      (
+        d_edge_right < d_edge_thresh or
+        ttc_edge_right < ttc_edge_thresh or
+        (right_line_visible and d_right < 0.0 and d_edge_right < 0.50)
+      )
     )
 
     # 9. Driver Override & Lockout Evaluation
@@ -235,10 +259,13 @@ class LaneKeepController:
     driver_override = steering_pressed or (abs(steering_torque) > 120.0 if abs(steering_torque) > 5.0 else abs(steering_torque) > OVERRIDE_TORQUE_THRESHOLD)
 
     if self._lockout:
-      # Clear lockout once driver applies torque or vehicle returns to center
-      if driver_override or (d_left > d_thresh_left + 0.15 and d_right > d_thresh_right + 0.15):
+      left_clear = (not left_line_visible or d_left > d_thresh_left + 0.15) and (edge_left_std >= 0.50 or d_edge_left > d_edge_thresh + 0.15)
+      right_clear = (not right_line_visible or d_right > d_thresh_right + 0.15) and (edge_right_std >= 0.50 or d_edge_right > d_edge_thresh + 0.15)
+      # Clear lockout once driver applies torque or vehicle returns safely inside boundaries
+      if driver_override or (left_clear and right_clear):
         self._lockout = False
         self._intervention_timer = 0.0
+        self._rdm_timer = 0.0
 
     # 10. Compute Corrective Spring (Curvature)
     target_curvature = 0.0
@@ -246,57 +273,65 @@ class LaneKeepController:
     is_right_nudge = False
     rdm_active = False
 
-    # Proportional and Derivative spring gains
+    # Proportional and Derivative spring gains (damping applies while approaching boundary)
     kp = 0.0065
     kd = 0.0030
 
-    if not self._lockout and not driver_override:
+    if not driver_override:
       if trigger_rdm_left or trigger_left_line:
         is_left_nudge = True
-        rdm_active = trigger_rdm_left
-        d_err = d_edge_thresh - d_edge_left if trigger_rdm_left else d_thresh_left - d_left
-        d_err = max(0.0, d_err)
-        # Negative curvature turns RIGHT away from left edge
-        target_curvature = -float(kp * d_err + kd * abs(d_dot_left))
+        rdm_active = bool(trigger_rdm_left)
+        if not self._lockout:
+          d_err = d_edge_thresh - d_edge_left if trigger_rdm_left else d_thresh_left - d_left
+          d_err = max(0.0, d_err)
+          vel_left = max(0.0, -d_dot_edge_left) if trigger_rdm_left else max(0.0, -d_dot_left)
+          # Positive curvature turns RIGHT away from left edge
+          target_curvature = float(kp * d_err + kd * vel_left)
       elif trigger_rdm_right or trigger_right_line:
         is_right_nudge = True
-        rdm_active = trigger_rdm_right
-        d_err = d_edge_thresh - d_edge_right if trigger_rdm_right else d_thresh_right - d_right
-        d_err = max(0.0, d_err)
-        # Positive curvature turns LEFT away from right edge
-        target_curvature = float(kp * d_err + kd * abs(d_dot_right))
+        rdm_active = bool(trigger_rdm_right)
+        if not self._lockout:
+          d_err = d_edge_thresh - d_edge_right if trigger_rdm_right else d_thresh_right - d_right
+          d_err = max(0.0, d_err)
+          vel_right = max(0.0, -d_dot_edge_right) if trigger_rdm_right else max(0.0, -d_dot_right)
+          # Negative curvature turns LEFT away from right edge
+          target_curvature = -float(kp * d_err + kd * vel_right)
 
-    # Clamp lateral acceleration to ceiling (0.8 - 1.2 m/s^2)
+    # Clamp lateral acceleration to ceiling (1.1 m/s^2 standard, 1.43 m/s^2 RDM)
     max_accel = MAX_LAT_ACCEL * (MAX_STEER_RATE_SCALE if rdm_active else 1.0)
     max_curvature = max_accel / max(v_ego * v_ego, 1.0)
     target_curvature = float(np.clip(target_curvature, -max_curvature, max_curvature))
 
-    # 11. 10-Second Anti-Lazy Timer Progression
+    # 11. Anti-Lazy & RDM Authority Timer Progression
     nudge_active = is_left_nudge or is_right_nudge
-    if nudge_active and not driver_override:
+    if nudge_active and not driver_override and not self._lockout:
       self._intervention_timer += dt
       if rdm_active:
         self._rdm_timer += dt
       else:
         self._rdm_timer = 0.0
-    else:
+    elif not self._lockout:
       self._intervention_timer = max(0.0, self._intervention_timer - 2.0 * dt)
       self._rdm_timer = max(0.0, self._rdm_timer - 2.0 * dt)
 
-    # Alert Stage Evaluation
-    if rdm_active and self._rdm_timer >= 15.0:
-      # RDM Emergency: approaching ditch timeout
-      self.alert = LaneKeepAlert.EMERGENCY_DEPARTURE
-    elif self._intervention_timer >= 10.0:
+    # Alert Stage Evaluation (18s authority ceiling for RDM, 10s for standard lane-line LKA)
+    lockout_limit = 18.0 if rdm_active else 10.0
+    if self._intervention_timer >= lockout_limit:
       # Stage 3: Cutoff & Lockout (prevent hands-off abuse)
       self._lockout = True
       target_curvature = 0.0
-      self.alert = LaneKeepAlert.KEEP_HANDS_ON_WHEEL
+      self.alert = LaneKeepAlert.EMERGENCY_DEPARTURE
+    elif self._lockout:
+      target_curvature = 0.0
+      self.alert = LaneKeepAlert.EMERGENCY_DEPARTURE
+    elif rdm_active and self._rdm_timer >= 15.0:
+      # RDM Emergency: sustained road-edge intervention >= 15s (continues steering up to 18s)
+      self.alert = LaneKeepAlert.EMERGENCY_DEPARTURE
     elif self._intervention_timer >= 8.0:
-      # Stage 2: Approaching timeout prompt
+      # Stage 2: Approaching timeout prompt (8s - 10s)
       self.alert = LaneKeepAlert.KEEP_HANDS_ON_WHEEL
     else:
-      # Stage 1: Silent gentle nudge
+      # Stage 1: Silent gentle nudge (0s - 8s)
       self.alert = LaneKeepAlert.NONE
 
     # 12. S-Curve Envelope Smoothing Filter
@@ -306,96 +341,57 @@ class LaneKeepController:
     self.desired_lat_accel = float(self.desired_curvature * (v_ego * v_ego))
 
     # 13. Cluster Line Visibility States
-    # Suppressed during sharp cornering (>= 45 deg)
+    # Suppressed during sharp cornering (>= 45 deg). Amber (3) fires for both lane-line LKA
+    # and unstriped road-edge RDM interventions.
     if steer_suppressed:
       self.left_line_state = 0
       self.right_line_state = 0
     else:
-      if self._blinker_cooldown_left > 0.0 or not left_line_visible:
+      if self._blinker_cooldown_left > 0.0:
         self.left_line_state = 0
       elif is_left_nudge:
         self.left_line_state = 3  # Amber / Yellow
-      else:
+      elif left_line_visible:
         self.left_line_state = 1  # Solid White
+      else:
+        self.left_line_state = 0
 
-      if self._blinker_cooldown_right > 0.0 or not right_line_visible:
+      if self._blinker_cooldown_right > 0.0:
         self.right_line_state = 0
       elif is_right_nudge:
         self.right_line_state = 3  # Amber / Yellow
-      else:
+      elif right_line_visible:
         self.right_line_state = 1  # Solid White
+      else:
+        self.right_line_state = 0
 
     # 14. UI Gradient State
     self.active = abs(self.desired_curvature) > 1e-5
     self.rdm_active = rdm_active
     self.is_red_gradient = rdm_active
 
-    if self.active:
-      # Opacity scales dynamically with proximity
-      proximity = max(0.0, min(1.0, abs(self.desired_lat_accel) / max_accel))
+    if self.active or nudge_active:
+      proximity = max(0.0, min(1.0, abs(self.desired_lat_accel) / max(max_accel, 1e-3)))
       self.gradient_opacity = float(0.35 + 0.65 * proximity)
     else:
       self.gradient_opacity = 0.0
 
 
-_ui_lka_controller = None
-
-def _get_toggle(toggles, key, default):
-  if isinstance(toggles, dict):
-    return toggles.get(key, default)
-  return getattr(toggles, key, default)
-
-def get_lane_keep_visual_state(
-  model_v2,
-  v_ego: float,
-  steering_angle_deg: float,
-  steering_torque: float,
-  *args,
-) -> tuple[bool, bool, bool, float, float]:
+def extract_lane_keep_visual_state(lateral_state) -> tuple[bool, bool, bool, float, float]:
   """
+  Single-source UI helper reading 100 Hz LKA visual state published by controlsd
+  on StarPilotLateralState.
   Returns (is_left_nudge, is_right_nudge, is_red, opacity, ribbon_width).
   """
-  global _ui_lka_controller
-  if _ui_lka_controller is None:
-    _ui_lka_controller = LaneKeepController()
-
-  if len(args) == 4:
-    left_blinker, right_blinker, lat_active, toggles = args
-    steering_pressed = False
-  elif len(args) >= 5:
-    steering_pressed, left_blinker, right_blinker, lat_active, toggles = args[:5]
-  else:
+  if lateral_state is None or not bool(getattr(lateral_state, "lkaArmed", False)):
     return False, False, False, 0.0, 0.30
 
-  enabled = bool(_get_toggle(toggles, "lane_keep_assist", True))
-  if not enabled or lat_active:
-    _ui_lka_controller.reset()
-    return False, False, False, 0.0, 0.30
+  is_left = int(getattr(lateral_state, "lkaLeftLineState", 0)) == 3
+  is_right = int(getattr(lateral_state, "lkaRightLineState", 0)) == 3
+  width = float(getattr(lateral_state, "lkaGradientWidth", 0.30) or 0.30)
+  if not (is_left or is_right):
+    return False, False, False, 0.0, width
 
-  mode = int(_get_toggle(toggles, "lane_keep_mode", LaneKeepMode.LANE_LINE_AND_ROAD_EDGE))
-  sensitivity = int(_get_toggle(toggles, "lane_keep_sensitivity", LaneKeepSensitivity.NORMAL))
-  min_speed = float(_get_toggle(toggles, "lane_keep_min_speed", 25.0))
-
-  _ui_lka_controller.update(
-    model_v2=model_v2,
-    v_ego=v_ego,
-    steering_angle_deg=steering_angle_deg,
-    steering_torque=steering_torque,
-    left_blinker=left_blinker,
-    right_blinker=right_blinker,
-    lat_active=lat_active,
-    steering_pressed=steering_pressed,
-    mode=mode,
-    sensitivity=sensitivity,
-    min_activation_speed_mph=min_speed,
-  )
-
-  is_left = _ui_lka_controller.left_line_state == 3
-  is_right = _ui_lka_controller.right_line_state == 3
-  return (
-    is_left,
-    is_right,
-    _ui_lka_controller.is_red_gradient,
-    _ui_lka_controller.gradient_opacity,
-    _ui_lka_controller.gradient_width,
-  )
+  is_red = bool(getattr(lateral_state, "lkaRdmActive", False))
+  opacity = float(getattr(lateral_state, "lkaGradientOpacity", 0.0))
+  return is_left, is_right, is_red, opacity, width

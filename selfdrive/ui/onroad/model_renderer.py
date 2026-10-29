@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.lane_centering import get_lane_centering_visual_direction
-from openpilot.selfdrive.controls.lib.lanekeep import get_lane_keep_visual_state
+from openpilot.selfdrive.controls.lib.lanekeep import extract_lane_keep_visual_state
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.lib.starpilot_theme import get_param_color, get_theme_color, get_visual_color, is_stock_color_scheme, with_alpha
 from openpilot.selfdrive.ui.onroad.radar_tracks import project_radar_points
@@ -267,8 +267,19 @@ class ModelRenderer(Widget):
     unclipped_max_idx = self._get_path_length_idx(self._lane_lines[0].raw_points[:, 0], unclipped_max_distance)
 
     # Update lane lines and road edges using batched projection
+    lka_left, lka_right, lka_red, _, lka_width = self._lane_keep_visual_state()
     lines = [*self._lane_lines, *self._road_edges]
-    widths = [lane_line_width_m * prob for prob in self._lane_line_probs] + [road_edge_width_m] * len(self._road_edges)
+    line_widths = [lane_line_width_m * prob for prob in self._lane_line_probs]
+    if lka_left and not lka_red and len(line_widths) > 1:
+      line_widths[1] = max(line_widths[1], lka_width * 0.5)
+    if lka_right and not lka_red and len(line_widths) > 2:
+      line_widths[2] = max(line_widths[2], lka_width * 0.5)
+    edge_widths = [road_edge_width_m] * len(self._road_edges)
+    if lka_left and lka_red and len(edge_widths) > 0:
+      edge_widths[0] = max(edge_widths[0], lka_width * 0.5)
+    if lka_right and lka_red and len(edge_widths) > 1:
+      edge_widths[1] = max(edge_widths[1], lka_width * 0.5)
+    widths = line_widths + edge_widths
     polygons = self._map_lines_to_polygons(
       [line.raw_points for line in lines], widths, 0.0, unclipped_max_idx, unclipped_max_distance, clip_by_lead=True
     )
@@ -408,25 +419,10 @@ class ModelRenderer(Widget):
     )
 
   def _lane_keep_visual_state(self):
-    toggles = ui_state.starpilot_toggles
     sm = ui_state.sm
-    if (sm.recv_frame.get("modelV2", 0) < ui_state.started_frame or
-        sm.recv_frame.get("carState", 0) < ui_state.started_frame):
+    if sm.recv_frame.get("starpilotLateralState", 0) < ui_state.started_frame:
       return False, False, False, 0.0, 0.30
-
-    car_state = sm["carState"]
-    lat_active = ui_state.status == UIStatus.ENGAGED or ui_state.always_on_lateral_active
-    return get_lane_keep_visual_state(
-      sm["modelV2"],
-      car_state.vEgo,
-      getattr(car_state, "steeringAngleDeg", 0.0),
-      getattr(car_state, "steeringTorque", 0.0),
-      bool(getattr(car_state, "steeringPressed", False)),
-      bool(getattr(car_state, "leftBlinker", False)),
-      bool(getattr(car_state, "rightBlinker", False)),
-      lat_active,
-      toggles,
-    )
+    return extract_lane_keep_visual_state(sm["starpilotLateralState"])
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""

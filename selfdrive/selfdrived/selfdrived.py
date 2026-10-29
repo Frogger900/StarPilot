@@ -143,6 +143,14 @@ def get_starpilot_alert_filters(current_alert_types: list[str], clear_event_type
       starpilot_alert_types.append(ET.WARNING)
     starpilot_clear_event_types.discard(ET.WARNING)
 
+  if any(
+    int(e) in starpilot_events.names or e in starpilot_events.names
+    for e in (StarPilotEventName.lkaKeepHandsOnWheel, StarPilotEventName.lkaEmergencyDeparture)
+  ):
+    if ET.WARNING not in starpilot_alert_types:
+      starpilot_alert_types.append(ET.WARNING)
+    starpilot_clear_event_types.discard(ET.WARNING)
+
   return starpilot_alert_types, starpilot_clear_event_types
 
 
@@ -214,7 +222,7 @@ class SelfdriveD:
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
-    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan']
+    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan', 'starpilotLateralState']
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY:
@@ -298,7 +306,7 @@ class SelfdriveD:
     elif self.CP.passive:
       self.events.add(EventName.dashcamMode, static=True)
 
-    self.sm = self.sm.extend(['starpilotCarState', 'starpilotPlan'])
+    self.sm = self.sm.extend(['starpilotCarState', 'starpilotLateralState', 'starpilotPlan'])
     self.pm = self.pm.extend(['starpilotOnroadEvents', 'starpilotSelfdriveState'])
 
     self.starpilot_toggles = get_starpilot_toggles()
@@ -853,6 +861,13 @@ class SelfdriveD:
       self.display_timer -= 1
 
     self.starpilot_events.add_from_msg(self.sm['starpilotPlan'].starpilotEvents)
+
+    if 'starpilotLateralState' in self.sm.valid and self.sm.valid['starpilotLateralState']:
+      lka_alert = int(getattr(self.sm['starpilotLateralState'], 'lkaAlert', 0))
+      if lka_alert == 1:
+        self.starpilot_events.add(StarPilotEventName.lkaKeepHandsOnWheel)
+      elif lka_alert == 2:
+        self.starpilot_events.add(StarPilotEventName.lkaEmergencyDeparture)
 
     self.experimental_mode = (not self.safe_mode and experimental_mode_available(self.CP) and (
       self.sm['starpilotPlan'].experimentalMode if not REPLAY or self.starpilot_toggles.conditional_experimental_mode

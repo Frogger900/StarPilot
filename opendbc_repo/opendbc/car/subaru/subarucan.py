@@ -106,25 +106,17 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
 
   values["COUNTER"] = frame % 0x10
 
-  # Filter the stock LKAS "Keep hands on wheel" alert
-  if values["LKAS_Alert_Msg"] == 1:
+  # Filter stock EyeSight centering engage/cancel and "Keep hands on wheel" alerts
+  # (25: centering engage beep, 27: centering off beep, 28: hands-on warning beep, 30: hands-on OFF cancel beep)
+  if values["LKAS_Alert"] in (25, 27, 28, 30):
+    values["LKAS_Alert"] = 0
+
+  if values["LKAS_Alert_Msg"] in (1, 7):
     values["LKAS_Alert_Msg"] = 0
 
-  # Filter the stock LKAS sending an audible alert when it turns off LKAS
-  if values["LKAS_Alert"] == 27:
+  # Suppress stock LDW beeps while openpilot centering or silent LKA boundary nudge owns lateral
+  if (enabled or left_line == 3 or right_line == 3) and values["LKAS_Alert"] in (11, 12):
     values["LKAS_Alert"] = 0
-
-  # Filter the stock LKAS sending an audible alert when "Keep hands on wheel" alert is active (2020+ models)
-  if values["LKAS_Alert"] == 28 and values["LKAS_Alert_Msg"] == 7:
-    values["LKAS_Alert"] = 0
-
-  # Filter the stock LKAS sending an audible alert when "Keep hands on wheel OFF" alert is active (2020+ models)
-  if values["LKAS_Alert"] == 30:
-    values["LKAS_Alert"] = 0
-
-  # Filter the stock LKAS sending "Keep hands on wheel OFF" alert (2020+ models)
-  if values["LKAS_Alert_Msg"] == 7:
-    values["LKAS_Alert_Msg"] = 0
 
   # Show Keep hands on wheel alert for openpilot steerRequired alert
   if visual_alert == VisualAlert.steerRequired:
@@ -320,20 +312,38 @@ def create_es_infotainment(packer, frame, es_infotainment_msg, visual_alert, bus
   return packer.make_can_msg("ES_Infotainment", bus, values)
 
 
-def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert):
+def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert, armed: bool = False):
   address = 0x3C4
   if len(raw_dat) != 8 or raw_dat[0] != (((address & 0xff) + (address >> 8) + sum(raw_dat[1:])) & 0xff):
     return None
 
   dat = bytearray(raw_dat)
+  changed = False
+
+  if armed:
+    # Suppress all background EyeSight centering/toggle/hands-off alerts whenever Cruise Main is armed,
+    # while preserving stock FCW (0x01, 0x02, 0x0e), native LDW (0x0b, 0x0c), and opaque status bits in dat[5:].
+    if dat[2] in (0x19, 0x1b, 0x1c, 0x1e) or (
+      dat[2] == 0x00 and ((dat[3] in (0x01, 0x07) and dat[4] == 0x04) or dat[4] in (0x02, 0x30))
+    ):
+      if not (visual_alert == VisualAlert.steerRequired and dat[2:5] == b"\x00\x01\x04"):
+        dat[2:5] = b"\x00\x00\x00"
+        changed = True
+    if visual_alert == VisualAlert.steerRequired and dat[2] == 0x00 and dat[3:5] != b"\x01\x04":
+      dat[3:5] = b"\x01\x04"
+      changed = True
+
   if lateral_active and visual_alert != VisualAlert.steerRequired:
     if dat[2:] == b"\x00\x01\x04\x00\x00\x00":
       dat[3:5] = b"\x00\x00"
-      dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
-    elif dat[2] in (0x1b, 0x0c) or dat[4] in (0x02, 0x06):
+      changed = True
+    elif dat[2] in (0x1b, 0x0b, 0x0c) or dat[4] in (0x02, 0x05, 0x06):
       dat[2] = 0x00
       dat[4] = 0x00
-      dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
+      changed = True
+
+  if changed:
+    dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff
   return address, bytes(dat), CanBus.main
 
 

@@ -21,6 +21,9 @@ _LEGACY_2025_MADS_MIN_SPEED = 0.44704
 _LEGACY_2025_MADS_MAX_STEER_ANGLE = 200.0
 _ANGLE_OVERRIDE_CONFIRM_FRAMES = 2
 _ANGLE_REENGAGE_MAX_STEER_RATE = 2.0
+_LKA_REENGAGE_MAX_STEER_RATE = 15.0
+_LKA_OVERRIDE_TORQUE_HIGH = 120
+_LKA_OVERRIDE_TORQUE_LOW = 80
 _ANGLE_MADS_MIN_SPEED = 0.44704
 _ANGLE_MADS_MAX_STEER_ANGLE = 120.0
 _ANGLE_STALL_ERROR_DEG = 5.0
@@ -58,8 +61,12 @@ class CarController(CarControllerBase):
     self.es_distance_counter_last = None
     self.ascent_lkas_alert_counter_last = None
     self.lat_active_seen = False
-    self.left_line_vis_debounced = False
-    self.right_line_vis_debounced = False
+    self.lka_armed = False
+    self.lka_nudge_active = False
+    self.in_drive_and_cruise_available = True
+    self.standstill_in_drive = False
+    self.left_line_vis_debounced = None
+    self.right_line_vis_debounced = None
     self.left_line_debounce_cnt = 0
     self.right_line_debounce_cnt = 0
 
@@ -158,18 +165,19 @@ class CarController(CarControllerBase):
 
     driver_override = self._update_angle_driver_override(CS)
     steering_rate = abs(getattr(CS.out, "steeringRateDeg", 0.0))
+    reengage_max_rate = _LKA_REENGAGE_MAX_STEER_RATE if self.lka_nudge_active else _ANGLE_REENGAGE_MAX_STEER_RATE
     if driver_override:
       self.angle_handoff_active = True
       return True
 
     if self.angle_handoff_active:
-      if steering_rate > _ANGLE_REENGAGE_MAX_STEER_RATE:
+      if steering_rate > reengage_max_rate:
         return True
 
       self.angle_handoff_active = False
       return True
 
-    if not self.angle_lkas_active and steering_rate > _ANGLE_REENGAGE_MAX_STEER_RATE:
+    if not self.angle_lkas_active and steering_rate > reengage_max_rate:
       self.angle_handoff_active = True
       return True
 
@@ -190,10 +198,12 @@ class CarController(CarControllerBase):
   def _update_angle_driver_override(self, CS):
     """Debounce the higher-confidence raw torque override signal for angle cars."""
     abs_torque = abs(getattr(CS.out, "steeringTorque", 0.0))
+    torque_low = min(self.p.STEER_OVERRIDE_TORQUE_LOW, _LKA_OVERRIDE_TORQUE_LOW) if self.lka_nudge_active else self.p.STEER_OVERRIDE_TORQUE_LOW
+    torque_high = min(self.p.STEER_OVERRIDE_TORQUE_HIGH, _LKA_OVERRIDE_TORQUE_HIGH) if self.lka_nudge_active else self.p.STEER_OVERRIDE_TORQUE_HIGH
     if self.driver_override:
-      if abs_torque < self.p.STEER_OVERRIDE_TORQUE_LOW:
+      if abs_torque < torque_low:
         self.driver_override = False
-    elif abs_torque > self.p.STEER_OVERRIDE_TORQUE_HIGH:
+    elif abs_torque > torque_high:
       self.angle_override_confirm_frames += 1
       if self.angle_override_confirm_frames >= _ANGLE_OVERRIDE_CONFIRM_FRAMES:
         self.driver_override = True
@@ -220,29 +230,21 @@ class CarController(CarControllerBase):
     if apply_angle is None:
       apply_angle = CC.actuators.steeringAngleDeg
 
-    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
-      hud_control = getattr(CC, "hudControl", None)
-      lka_left = getattr(hud_control, "leftLaneDepart", False)
-      lka_right = getattr(hud_control, "rightLaneDepart", False)
-      lka_nudge = not CC.latActive and (lka_left or lka_right) and \
-        CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
+    self.lka_armed = bool(getattr(CS, "lka_armed", False))
+    self.lka_nudge_active = bool(getattr(CS, "lka_nudge_active", False))
 
+    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
       mads_only = CC.latActive and not CC.enabled
       if mads_only:
         apply_angle = float(np.clip(apply_angle, -_LEGACY_2025_MADS_MAX_STEER_ANGLE, _LEGACY_2025_MADS_MAX_STEER_ANGLE))
 
       mads_only_ok = CS.out.vEgoRaw > _LEGACY_2025_MADS_MIN_SPEED and \
         abs(CS.out.steeringAngleDeg) <= (_LEGACY_2025_MADS_MAX_STEER_ANGLE + 10.0)
-      lkas_available = (CC.latActive and (not mads_only or mads_only_ok) or lka_nudge) and \
+      lkas_available = CC.latActive and (not mads_only or mads_only_ok) and \
         CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
 
       manual_handoff = self._angle_manual_handoff(CS, lkas_available)
       lkas_active = lkas_available and not manual_handoff
-
-      if lka_nudge and not manual_handoff:
-        # Gentle 1.5 deg countersteering nudge back toward lane center
-        nudge_offset = -1.5 if lka_left else 1.5
-        apply_angle = getattr(CS.out, "steeringAngleDeg", 0.0) + nudge_offset
 
       apply_steer = apply_std_steer_angle_limits(
         apply_angle,
@@ -341,26 +343,39 @@ class CarController(CarControllerBase):
     return subarucan.create_steering_control(self.packer, apply_torque, apply_steer_req)
 
   def _lkas_status_active(self, CC):
+    if self.lka_nudge_active or self.lka_armed or not self.in_drive_and_cruise_available:
+      return False
     if self.CP.carFingerprint in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_LEGACY_2025):
-      # Physical rack angle commands (0x124) are suppressed at standstill (0 mph) to prevent dry-steer faults,
-      # but the cluster icon (0x322) must stay GREEN (2) whenever steering is actively engaged (MADS/AOL or openpilot)
-      # and not overridden by the driver.
-      if not CC.latActive or self.driver_override or self.angle_handoff_active:
-        return False
-      return True
+      if self.angle_lkas_active:
+        return True
+      return bool(CC.latActive and self.standstill_in_drive and not self.driver_override and not self.angle_handoff_active)
     return CC.latActive
 
   def _ascent_lkas_alert(self, CC, CS):
     if self.CP.carFingerprint not in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025) or not self.CP.flags & SubaruFlags.ASCENT_LKAS_ALERT:
       return None
     dat = getattr(CS, "es_lkas_alert_dat", b"")
-    msg = subarucan.create_ascent_lkas_alert(dat, self._lkas_status_active(CC), CC.hudControl.visualAlert)
+    cruise_state = getattr(getattr(CS, "out", None), "cruiseState", None)
+    armed = bool(cruise_state.available) if cruise_state is not None else False
+    msg = subarucan.create_ascent_lkas_alert(dat, self.angle_lkas_active, CC.hudControl.visualAlert, armed=armed)
     if msg is None or (dat[1] & 0xf) == self.ascent_lkas_alert_counter_last:
       return None
     self.ascent_lkas_alert_counter_last = dat[1] & 0xf
     return msg
 
   def update(self, CC, CS, now_nanos, starpilot_toggles=None):
+    self.lka_armed = bool(getattr(CS, "lka_armed", False))
+    self.lka_nudge_active = bool(getattr(CS, "lka_nudge_active", False))
+    cs_out = getattr(CS, "out", None)
+    in_drive = getattr(cs_out, "gearShifter", None) == structs.CarState.GearShifter.drive
+    cruise_state = getattr(cs_out, "cruiseState", None)
+    cruise_available = bool(cruise_state.available) if cruise_state is not None else bool(
+      CC.enabled or CC.latActive or self.lka_armed or self.lka_nudge_active
+    )
+    self.in_drive_and_cruise_available = bool(in_drive and cruise_available)
+    self.standstill_in_drive = bool(
+      in_drive and (getattr(cs_out, "standstill", False) or getattr(cs_out, "vEgoRaw", 0.0) < _LEGACY_2025_MADS_MIN_SPEED)
+    )
     actuators = CC.actuators
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
@@ -460,64 +475,72 @@ class CarController(CarControllerBase):
                                                           self.status_bus))
 
         if getattr(CS, "es_lkas_state_msg", None) is not None:
-          in_drive = getattr(CS.out, "gearShifter", None) == structs.CarState.GearShifter.drive
-          standstill = getattr(CS.out, "standstill", False) or getattr(CS.out, "vEgoRaw", 0.0) < _LEGACY_2025_MADS_MIN_SPEED
-
-          if CC.latActive:
-            self.lat_active_seen = True
-          elif not in_drive:
+          if not self.in_drive_and_cruise_available:
+            # Cruise Main OFF (Cruise_On == 0) or shifted out of Drive:
+            # Hide BOTH the steering wheel icon (0) and lane lines (0) completely.
             self.lat_active_seen = False
-
-          # Steering wheel icon states on cluster (LKAS_Dash_State):
-          # 2 (Green): Active centering while moving
-          # 1 (White): Standstill in Drive with MADS armed, OR driver manual override while MADS active
-          # 0 (Off): MADS disengaged, or shifted out of Drive
-          mads_override = CC.latActive and (self.driver_override or self.angle_handoff_active)
-          mads_standstill_ready = not CC.latActive and in_drive and standstill and self.lat_active_seen
-          wheel_ready = mads_override or mads_standstill_ready
-
-          # Line debouncing (max change once a second ~ 10 frames @ 10 Hz)
-          raw_left_vis = bool(hud_control.leftLaneVisible)
-          raw_right_vis = bool(hud_control.rightLaneVisible)
-
-          if raw_left_vis != self.left_line_vis_debounced:
-            self.left_line_debounce_cnt += 1
-            if self.left_line_debounce_cnt >= 10:
-              self.left_line_vis_debounced = raw_left_vis
-              self.left_line_debounce_cnt = 0
-          else:
+            self.left_line_vis_debounced = None
+            self.right_line_vis_debounced = None
             self.left_line_debounce_cnt = 0
-
-          if raw_right_vis != self.right_line_vis_debounced:
-            self.right_line_debounce_cnt += 1
-            if self.right_line_debounce_cnt >= 10:
-              self.right_line_vis_debounced = raw_right_vis
-              self.right_line_debounce_cnt = 0
-          else:
             self.right_line_debounce_cnt = 0
-
-          # Cornering and blinker line suppression gates
-          steer_angle_deg = abs(getattr(CS.out, "steeringAngleDeg", 0.0))
-          # In MADS / Active Centering, do NOT cut out lines on wheel angle or speed;
-          # track all the way down to a complete stop as long as openpilot sees them.
-          # Cornering gate (> 45 deg) only suppresses lines in passive LKA standby.
-          steer_gate = (steer_angle_deg >= 45.0) if not CC.latActive else False
-          left_blinker = bool(getattr(CS.out, "leftBlinker", False))
-          right_blinker = bool(getattr(CS.out, "rightBlinker", False))
-
-          if hud_control.leftLaneDepart:
-            left_line = 3  # Amber nudge line on cluster (immediate, no debounce)
-          elif steer_gate or left_blinker:
+            wheel_ready = False
             left_line = 0
-          else:
-            left_line = 1 if self.left_line_vis_debounced else 0
-
-          if hud_control.rightLaneDepart:
-            right_line = 3  # Amber nudge line on cluster (immediate, no debounce)
-          elif steer_gate or right_blinker:
             right_line = 0
           else:
-            right_line = 1 if self.right_line_vis_debounced else 0
+            if CC.latActive and not self.lka_nudge_active:
+              self.lat_active_seen = True
+
+            # Steering wheel icon states on cluster (LKAS_Dash_State) when Cruise_On == 1 in Drive:
+            # 2 (Green): Continuous Centering actively steering (_lkas_status_active(CC) == True)
+            # 1 (White): LKA-Only standby/nudge, OR Continuous Centering paused at standstill / manually overridden
+            wheel_ready = True
+
+            # Line debouncing (immediate seed when freshly armed; 1.0s = 10 frames @ 10 Hz debounce thereafter)
+            raw_left_vis = bool(hud_control.leftLaneVisible)
+            raw_right_vis = bool(hud_control.rightLaneVisible)
+
+            if self.left_line_vis_debounced is None:
+              self.left_line_vis_debounced = raw_left_vis
+              self.left_line_debounce_cnt = 0
+            elif raw_left_vis != self.left_line_vis_debounced:
+              self.left_line_debounce_cnt += 1
+              if self.left_line_debounce_cnt >= 10:
+                self.left_line_vis_debounced = raw_left_vis
+                self.left_line_debounce_cnt = 0
+            else:
+              self.left_line_debounce_cnt = 0
+
+            if self.right_line_vis_debounced is None:
+              self.right_line_vis_debounced = raw_right_vis
+              self.right_line_debounce_cnt = 0
+            elif raw_right_vis != self.right_line_vis_debounced:
+              self.right_line_debounce_cnt += 1
+              if self.right_line_debounce_cnt >= 10:
+                self.right_line_vis_debounced = raw_right_vis
+                self.right_line_debounce_cnt = 0
+            else:
+              self.right_line_debounce_cnt = 0
+
+            steer_angle_deg = abs(getattr(CS.out, "steeringAngleDeg", 0.0))
+            # In Continuous Centering (not self.lka_armed), do NOT cut out lines on 45-deg wheel angle or speed;
+            # track all the way down to 0 mph. Cornering gate (>= 45 deg) applies only in LKA-Only mode.
+            steer_gate = (steer_angle_deg >= 45.0) if self.lka_armed else False
+            left_blinker = bool(getattr(CS.out, "leftBlinker", False))
+            right_blinker = bool(getattr(CS.out, "rightBlinker", False))
+
+            if hud_control.leftLaneDepart:
+              left_line = 3  # Amber nudge line on cluster (immediate, no debounce)
+            elif steer_gate or left_blinker:
+              left_line = 0
+            else:
+              left_line = 1 if self.left_line_vis_debounced else 0
+
+            if hud_control.rightLaneDepart:
+              right_line = 3  # Amber nudge line on cluster (immediate, no debounce)
+            elif steer_gate or right_blinker:
+              right_line = 0
+            else:
+              right_line = 1 if self.right_line_vis_debounced else 0
 
           can_sends.append(subarucan.create_es_lkas_state(
             self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
