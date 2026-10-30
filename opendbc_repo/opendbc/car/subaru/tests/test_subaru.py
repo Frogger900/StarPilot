@@ -1513,15 +1513,49 @@ def test_legacy_2025_lka_countersteer_nudge():
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 3
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
 
-  # 3. Softer LKA driver torque override (85 > _LKA_OVERRIDE_TORQUE_HIGH=70, < MADS 200):
-  # Yields EPS angle request immediately after confirm frames
-  CS.out.steeringTorque = 85.0
-  for frame in range(32, 39, 2):
+  # 3. Directional LKA driver torque override:
+  # - Passive resting-hand torsion-bar drag (-85 opposing right-line left nudge) and
+  #   same-direction assisting/curve-holding torque (+155 < MADS 200) do NOT cut off LKAS_Request!
+  cur_frame = 32
+  for non_override_torque in (-85.0, 155.0):
+    CS.out.steeringTorque = non_override_torque
+    for _ in range(4):
+      controller.frame = cur_frame
+      _, can_sends = controller.update(CC, CS, cur_frame * 10_000_000)
+      angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
+      if angle_msgs:
+        es_lkas_angle_parser.update([(cur_frame, angle_msgs)])
+      cur_frame += 2
+    assert es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
+
+  # - Intentional opposing torque (-155 < -_LKA_OVERRIDE_TORQUE_HIGH=-140, softer than MADS 200)
+  #   yields EPS angle request cleanly after confirm frames
+  CS.out.steeringTorque = -155.0
+  for _ in range(4):
+    controller.frame = cur_frame
+    _, can_sends = controller.update(CC, CS, cur_frame * 10_000_000)
+    angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
+    if angle_msgs:
+      es_lkas_angle_parser.update([(cur_frame, angle_msgs)])
+    cur_frame += 2
+  assert es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
+
+  # 4. 100 Hz -> 10 Hz inter-packet depart latch on 0x322:
+  # A brief leftLaneDepart pulse occurring between 10 Hz status ticks (frames 62..65)
+  # is latched and transmitted as LKAS_Left_Line_Visible == 3 at frame 70, then clears at frame 80.
+  CS.out.steeringTorque = 0.0
+  CC.hudControl.rightLaneDepart = False
+  for frame in range(60, 81):
+    CC.hudControl.leftLaneDepart = 62 <= frame <= 65
     controller.frame = frame
     _, can_sends = controller.update(CC, CS, frame * 10_000_000)
-  angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
-  es_lkas_angle_parser.update([(3, angle_msgs)])
-  assert es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
+    state_msgs = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
+    if state_msgs:
+      es_lkas_state_parser.update([(frame, state_msgs)])
+    if frame == 70:
+      assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 3
+    elif frame == 80:
+      assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
 
 
 def test_legacy_2025_lane_centering_button_emits_lkas_event_only_when_cruise_available():
@@ -1691,6 +1725,3 @@ def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw
   _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw_idle, False, VisualAlert.steerRequired, armed=True)
   assert out_dat[2:5] == bytes.fromhex("000104")
   assert out_dat[5] == 0x22
-
-
-

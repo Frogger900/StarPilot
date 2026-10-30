@@ -408,6 +408,7 @@ class Controls:
     self.lane_centering = LaneCenteringController()
     self.lka = LaneKeepController()
     self.lka_anchor_curvature = 0.0
+    self.lka_parallel_blend = 0.0
     self.lka_was_active = False
     self.lka_armed_last = False
     self.lc_entry_sign = 0.0
@@ -584,6 +585,7 @@ class Controls:
         min_activation_speed_mph=lka_min_speed,
         dt=DT_CTRL,
         model_updated=bool(self.sm.updated['modelV2']),
+        torque_unit_nm=(self.CP.brand in ("tesla", "rivian")),
       )
     else:
       self.lka.reset(full=not lka_armed_raw)
@@ -592,7 +594,10 @@ class Controls:
     if lka_actuating:
       if not self.lka_was_active:
         self.lka_anchor_curvature = self.curvature
+        self.lka_parallel_blend = 0.0
       CC.latActive = True
+    else:
+      self.lka_parallel_blend = 0.0
     self.lka_was_active = lka_actuating
 
     # EcuDisableFailed is set when car started in READY mode (ECU disable was rejected)
@@ -633,15 +638,32 @@ class Controls:
     # Steering PID loop and lateral MPC
     if lka_actuating:
       self.lane_centering.reset()
-      jerk_factor = 1.0
-      # Anchor strictly to the driver's live steering curvature (ratcheted only in the
-      # corrective direction so manual recovery is never resisted) rather than jumping
-      # to modelV2.action.desiredCurvature (which commands full lane centering).
-      if self.lka.desired_curvature >= 0.0:
-        self.lka_anchor_curvature = max(self.lka_anchor_curvature, self.curvature)
+      jerk_factor = 0.5
+      # Guide smoothly toward the boundary line's own road curvature (clamped close to
+      # the fixed onset curvature, never ratcheted from live wheel feedback) plus LKA's
+      # drift-stopping nudge so the car aligns parallel to the line without snowballing
+      # across the lane.
+      b_curv = float(getattr(self.lka, "boundary_curvature", 0.0))
+      max_align_curv = 0.28 / max(CS.vEgo * CS.vEgo, 25.0)
+      nudge_right = (self.lka.desired_curvature > 0.0) or (
+        self.lka.desired_curvature == 0.0 and self.lka.left_line_state == 3
+      )
+      if nudge_right:
+        parallel_curv = max(self.lka_anchor_curvature, min(b_curv, self.lka_anchor_curvature + max_align_curv))
       else:
-        self.lka_anchor_curvature = min(self.lka_anchor_curvature, self.curvature)
-      new_desired_curvature = self.lka_anchor_curvature + self.lka.desired_curvature
+        parallel_curv = min(self.lka_anchor_curvature, max(b_curv, self.lka_anchor_curvature - max_align_curv))
+      blend = float(getattr(self, "lka_parallel_blend", 0.0))
+      blend += float(DT_CTRL / (0.18 + DT_CTRL)) * (1.0 - blend)
+      self.lka_parallel_blend = blend
+      baseline_curv = self.lka_anchor_curvature + blend * (parallel_curv - self.lka_anchor_curvature)
+      target_curv = baseline_curv + self.lka.desired_curvature
+      # Non-ratcheting transparency clamp: fixed target_curv never feeds back on self.curvature
+      # (zero snowball), while allowing the driver to manually steer further away from the line
+      # without EPS holding the wheel back.
+      if nudge_right:
+        new_desired_curvature = max(target_curv, self.curvature)
+      else:
+        new_desired_curvature = min(target_curv, self.curvature)
     else:
       # Steering PID loop and lateral MPC
       # Reset desired curvature to current to avoid violating the limits on engage

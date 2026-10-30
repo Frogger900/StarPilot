@@ -21,9 +21,9 @@ _LEGACY_2025_MADS_MIN_SPEED = 0.44704
 _LEGACY_2025_MADS_MAX_STEER_ANGLE = 200.0
 _ANGLE_OVERRIDE_CONFIRM_FRAMES = 2
 _ANGLE_REENGAGE_MAX_STEER_RATE = 2.0
-_LKA_REENGAGE_MAX_STEER_RATE = 15.0
-_LKA_OVERRIDE_TORQUE_HIGH = 70
-_LKA_OVERRIDE_TORQUE_LOW = 45
+_LKA_REENGAGE_MAX_STEER_RATE = 25.0
+_LKA_OVERRIDE_TORQUE_HIGH = 140
+_LKA_OVERRIDE_TORQUE_LOW = 90
 _ANGLE_MADS_MIN_SPEED = 0.44704
 _ANGLE_MADS_MAX_STEER_ANGLE = 120.0
 _ANGLE_STALL_ERROR_DEG = 5.0
@@ -69,6 +69,8 @@ class CarController(CarControllerBase):
     self.right_line_vis_debounced = None
     self.left_line_debounce_cnt = 0
     self.right_line_debounce_cnt = 0
+    self.left_depart_latched = False
+    self.right_depart_latched = False
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -158,12 +160,12 @@ class CarController(CarControllerBase):
     self.angle_handoff_active = False
     self.angle_stall_frames = 0
 
-  def _angle_manual_handoff(self, CS, lat_active):
+  def _angle_manual_handoff(self, CS, lat_active, apply_angle=None, CC=None):
     if not lat_active:
       self._reset_angle_handoff()
       return False
 
-    driver_override = self._update_angle_driver_override(CS)
+    driver_override = self._update_angle_driver_override(CS, apply_angle=apply_angle, CC=CC)
     steering_rate = abs(getattr(CS.out, "steeringRateDeg", 0.0))
     reengage_max_rate = _LKA_REENGAGE_MAX_STEER_RATE if self.lka_nudge_active else _ANGLE_REENGAGE_MAX_STEER_RATE
     if driver_override:
@@ -195,11 +197,26 @@ class CarController(CarControllerBase):
 
     return False
 
-  def _update_angle_driver_override(self, CS):
+  def _update_angle_driver_override(self, CS, apply_angle=None, CC=None):
     """Debounce the higher-confidence raw torque override signal for angle cars."""
-    abs_torque = abs(getattr(CS.out, "steeringTorque", 0.0))
-    torque_low = min(self.p.STEER_OVERRIDE_TORQUE_LOW, _LKA_OVERRIDE_TORQUE_LOW) if self.lka_nudge_active else self.p.STEER_OVERRIDE_TORQUE_LOW
-    torque_high = min(self.p.STEER_OVERRIDE_TORQUE_HIGH, _LKA_OVERRIDE_TORQUE_HIGH) if self.lka_nudge_active else self.p.STEER_OVERRIDE_TORQUE_HIGH
+    raw_torque = float(getattr(CS.out, "steeringTorque", 0.0))
+    abs_torque = abs(raw_torque)
+    if self.lka_nudge_active:
+      hud = getattr(CC, "hudControl", None)
+      steer_angle = float(getattr(CS.out, "steeringAngleDeg", 0.0))
+      if hud is not None and getattr(hud, "leftLaneDepart", False):
+        opposing = raw_torque > 0.0
+      elif hud is not None and getattr(hud, "rightLaneDepart", False):
+        opposing = raw_torque < 0.0
+      elif apply_angle is not None and abs(float(apply_angle) - steer_angle) > 0.05:
+        opposing = (raw_torque > 0.0) if float(apply_angle) < steer_angle else (raw_torque < 0.0)
+      else:
+        opposing = True
+      torque_low = min(self.p.STEER_OVERRIDE_TORQUE_LOW, _LKA_OVERRIDE_TORQUE_LOW) if opposing else self.p.STEER_OVERRIDE_TORQUE_LOW
+      torque_high = min(self.p.STEER_OVERRIDE_TORQUE_HIGH, _LKA_OVERRIDE_TORQUE_HIGH) if opposing else self.p.STEER_OVERRIDE_TORQUE_HIGH
+    else:
+      torque_low = self.p.STEER_OVERRIDE_TORQUE_LOW
+      torque_high = self.p.STEER_OVERRIDE_TORQUE_HIGH
     if self.driver_override:
       if abs_torque < torque_low:
         self.driver_override = False
@@ -243,7 +260,7 @@ class CarController(CarControllerBase):
       lkas_available = CC.latActive and (not mads_only or mads_only_ok) and \
         CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
 
-      manual_handoff = self._angle_manual_handoff(CS, lkas_available)
+      manual_handoff = self._angle_manual_handoff(CS, lkas_available, apply_angle=apply_angle, CC=CC)
       lkas_active = lkas_available and not manual_handoff
 
       apply_steer = apply_std_steer_angle_limits(
@@ -275,7 +292,7 @@ class CarController(CarControllerBase):
         manual_handoff = not self.angle_lkas_active and \
           abs(getattr(CS.out, "steeringRateDeg", 0.0)) > _ANGLE_REENGAGE_MAX_STEER_RATE
       else:
-        manual_handoff = self._angle_manual_handoff(CS, lkas_available)
+        manual_handoff = self._angle_manual_handoff(CS, lkas_available, apply_angle=apply_angle, CC=CC)
       lkas_active = lkas_available and not manual_handoff
 
       apply_steer = apply_std_steer_angle_limits(
@@ -296,7 +313,7 @@ class CarController(CarControllerBase):
     lkas_available = CC.latActive and (not mads_only or mads_only_ok) and \
       getattr(CS.out, "gearShifter", structs.CarState.GearShifter.drive) == structs.CarState.GearShifter.drive and \
       not getattr(CS.out, "standstill", False)
-    manual_handoff = self._angle_manual_handoff(CS, lkas_available)
+    manual_handoff = self._angle_manual_handoff(CS, lkas_available, apply_angle=apply_angle, CC=CC)
     lat_active = lkas_available and not self.driver_override and not manual_handoff
     if lat_active and not self.angle_lkas_active:
       self.apply_steer_last = CS.out.steeringAngleDeg
@@ -378,6 +395,20 @@ class CarController(CarControllerBase):
     )
     actuators = CC.actuators
     hud_control = CC.hudControl
+    raw_left_depart = bool(getattr(hud_control, "leftLaneDepart", False))
+    raw_right_depart = bool(getattr(hud_control, "rightLaneDepart", False))
+    if not self.in_drive_and_cruise_available:
+      self.left_depart_latched = False
+      self.right_depart_latched = False
+    else:
+      if raw_left_depart:
+        self.left_depart_latched = True
+        if not raw_right_depart:
+          self.right_depart_latched = False
+      if raw_right_depart:
+        self.right_depart_latched = True
+        if not raw_left_depart:
+          self.left_depart_latched = False
     pcm_cancel_cmd = CC.cruiseControl.cancel
     subaru_redneck_cruise = bool(
       self.CP.carFingerprint == CAR.SUBARU_IMPREZA_2020 and
@@ -496,9 +527,13 @@ class CarController(CarControllerBase):
             self.right_line_vis_debounced = None
             self.left_line_debounce_cnt = 0
             self.right_line_debounce_cnt = 0
+            self.left_depart_latched = False
+            self.right_depart_latched = False
             wheel_ready = False
             left_line = 0
             right_line = 0
+            left_depart = False
+            right_depart = False
           else:
             if CC.latActive and not self.lka_nudge_active:
               self.lat_active_seen = True
@@ -540,15 +575,19 @@ class CarController(CarControllerBase):
             steer_gate = (steer_angle_deg >= 45.0) if self.lka_armed else False
             left_blinker = bool(getattr(CS.out, "leftBlinker", False))
             right_blinker = bool(getattr(CS.out, "rightBlinker", False))
+            left_depart = (raw_left_depart or self.left_depart_latched) and not steer_gate and not left_blinker
+            right_depart = (raw_right_depart or self.right_depart_latched) and not steer_gate and not right_blinker
+            self.left_depart_latched = raw_left_depart
+            self.right_depart_latched = raw_right_depart
 
-            if hud_control.leftLaneDepart:
+            if left_depart:
               left_line = 3  # Amber nudge line on cluster (immediate, no debounce)
             elif steer_gate or left_blinker:
               left_line = 0
             else:
               left_line = 1 if self.left_line_vis_debounced else 0
 
-            if hud_control.rightLaneDepart:
+            if right_depart:
               right_line = 3  # Amber nudge line on cluster (immediate, no debounce)
             elif steer_gate or right_blinker:
               right_line = 0
@@ -558,7 +597,7 @@ class CarController(CarControllerBase):
           can_sends.append(subarucan.create_es_lkas_state(
             self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,
             left_line, right_line,
-            hud_control.leftLaneDepart, hud_control.rightLaneDepart, self.status_bus,
+            left_depart, right_depart, self.status_bus,
             ready=wheel_ready,
             in_drive=in_drive,
           ))
