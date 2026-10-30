@@ -1343,7 +1343,8 @@ def test_legacy_2025_mads_launch_from_standstill_syncs_angle_filter_without_twit
 def test_lka_nudge_bypasses_angle_filter_while_mads_retains_filter():
   CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
 
-  # LKA nudge at low speed (5.0 m/s) bypasses angle_filter directly to actuators.steeringAngleDeg
+  # LKA nudge at low speed (5.0 m/s) uses a fast 30 ms micro-step smoother (vs 300 ms MADS)
+  # and smooth _LKA_ANGLE_LIMITS (0.24 deg per 50 Hz frame at 5.0 m/s)
   lka_ctrl = CarController({}, CP)
   CC = structs.CarControl(enabled=False, latActive=True)
   CC.actuators.steeringAngleDeg = 2.0
@@ -1354,7 +1355,8 @@ def test_lka_nudge_bypasses_angle_filter_while_mads_retains_filter():
     es_lkas_state_msg=defaultdict(int),
   )
   lka_ctrl.update(CC.as_reader(), CS_lka, 0)
-  assert lka_ctrl.angle_filter.x == pytest.approx(2.0)
+  assert lka_ctrl.angle_filter.x == pytest.approx(2.0 * (0.01 / 0.04))
+  assert lka_ctrl.apply_steer_last == pytest.approx(0.24)
 
   # MADS centering at the same speed (5.0 m/s) retains tau=0.3s angle_filter smoothing
   mads_ctrl = CarController({}, CP)
@@ -1471,44 +1473,50 @@ def test_legacy_2025_lka_countersteer_nudge():
   )
 
   # 1. Left lane departure nudge:
-  # - Drift re-entry rate 12.0 deg/s <= 15.0 deg/s is allowed (not blocked by MADS 5.0 deg/s gate)
-  # - Steering angle smoothly rate-limits from 5.0 to 3.5 deg
+  # - Drift re-entry rate 12.0 deg/s <= 25.0 deg/s is allowed (not blocked by MADS 2.0 deg/s gate)
+  # - Steering angle smoothly rate-limits from 5.0 to 3.5 deg under _LKA_ANGLE_LIMITS (~9.9 deg/s @ 20 m/s)
   # - LKAS_Dash_State stays 1 (White wheel during LKA-Only standby & active nudges)
   # - LKAS_Left_Line_Visible = 3 (Amber line on cluster)
-  for frame in range(11):
+  prev_out = None
+  for frame in range(21):
     controller.frame = frame
-    _, can_sends = controller.update(CC, CS, frame * 20_000_000)
+    _, can_sends = controller.update(CC, CS, frame * 10_000_000)
+    angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
+    if angle_msgs:
+      es_lkas_angle_parser.update([(frame, angle_msgs)])
+      cur_out = float(es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"])
+      if prev_out is not None:
+        assert abs(cur_out - prev_out) <= 0.225
+      prev_out = cur_out
+    state_msgs = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
+    if state_msgs:
+      es_lkas_state_parser.update([(frame, state_msgs)])
 
-  angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
-  assert len(angle_msgs) == 1
-  es_lkas_angle_parser.update([(1, angle_msgs)])
   assert es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
   assert round(es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"], 1) == 3.5
-
-  state_msgs = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
-  assert len(state_msgs) == 1
-  es_lkas_state_parser.update([(1, state_msgs)])
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 3
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 
-  # 2. Right lane departure nudge: commands 6.5 deg target
+  # 2. Right lane departure nudge: smoothly commands 6.5 deg target under _LKA_ANGLE_LIMITS (~8.6 deg/s @ 20 m/s)
   CC.actuators.steeringAngleDeg = 6.5
   CC.hudControl.leftLaneDepart = False
   CC.hudControl.rightLaneDepart = True
-  for frame in range(11, 31):
+  for frame in range(21, 61):
     controller.frame = frame
-    _, can_sends = controller.update(CC, CS, frame * 20_000_000)
+    _, can_sends = controller.update(CC, CS, frame * 10_000_000)
+    angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
+    if angle_msgs:
+      es_lkas_angle_parser.update([(frame, angle_msgs)])
+      cur_out = float(es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"])
+      assert abs(cur_out - prev_out) <= 0.225
+      prev_out = cur_out
+    state_msgs = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
+    if state_msgs:
+      es_lkas_state_parser.update([(frame, state_msgs)])
 
-  angle_msgs = [msg for msg in can_sends if msg[0] == 0x124]
-  assert len(angle_msgs) == 1
-  es_lkas_angle_parser.update([(2, angle_msgs)])
   assert es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
   assert round(es_lkas_angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"], 1) == 6.5
-
-  state_msgs = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
-  assert len(state_msgs) == 1
-  es_lkas_state_parser.update([(2, state_msgs)])
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 3
   assert es_lkas_state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
@@ -1516,7 +1524,7 @@ def test_legacy_2025_lka_countersteer_nudge():
   # 3. Directional LKA driver torque override:
   # - Passive resting-hand torsion-bar drag (-85 opposing right-line left nudge) and
   #   same-direction assisting/curve-holding torque (+155 < MADS 200) do NOT cut off LKAS_Request!
-  cur_frame = 32
+  cur_frame = 62
   for non_override_torque in (-85.0, 155.0):
     CS.out.steeringTorque = non_override_torque
     for _ in range(4):

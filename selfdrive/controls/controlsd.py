@@ -638,13 +638,15 @@ class Controls:
     # Steering PID loop and lateral MPC
     if lka_actuating:
       self.lane_centering.reset()
-      jerk_factor = 0.5
+      nudge_holding = bool(getattr(self.lka, "nudge_active", False))
+      jerk_factor = 0.28 if nudge_holding else 0.38
       # Guide smoothly toward the boundary line's own road curvature (clamped close to
       # the fixed onset curvature, never ratcheted from live wheel feedback) plus LKA's
       # drift-stopping nudge so the car aligns parallel to the line without snowballing
-      # across the lane.
+      # across the lane, then unwind smoothly back to live wheel curvature on release.
       b_curv = float(getattr(self.lka, "boundary_curvature", 0.0))
-      max_align_curv = 0.28 / max(CS.vEgo * CS.vEgo, 25.0)
+      v2_eff = max(CS.vEgo * CS.vEgo, 25.0)
+      max_align_curv = 0.24 / v2_eff
       nudge_right = (self.lka.desired_curvature > 0.0) or (
         self.lka.desired_curvature == 0.0 and self.lka.left_line_state == 3
       )
@@ -653,10 +655,20 @@ class Controls:
       else:
         parallel_curv = min(self.lka_anchor_curvature, max(b_curv, self.lka_anchor_curvature - max_align_curv))
       blend = float(getattr(self, "lka_parallel_blend", 0.0))
-      blend += float(DT_CTRL / (0.18 + DT_CTRL)) * (1.0 - blend)
+      if nudge_holding:
+        blend_target = min(1.0, abs(float(getattr(self.lka, "desired_lat_accel", 0.0))) / 0.16)
+        blend += float(DT_CTRL / (0.26 + DT_CTRL)) * (blend_target - blend)
+      else:
+        blend += float(DT_CTRL / (0.07 + DT_CTRL)) * (0.0 - blend)
+        self.lka_anchor_curvature += float(DT_CTRL / (0.07 + DT_CTRL)) * (self.curvature - self.lka_anchor_curvature)
       self.lka_parallel_blend = blend
       baseline_curv = self.lka_anchor_curvature + blend * (parallel_curv - self.lka_anchor_curvature)
       target_curv = baseline_curv + self.lka.desired_curvature
+      max_total_curv = (0.52 if self.lka.rdm_active else 0.42) / v2_eff
+      if nudge_right:
+        target_curv = min(target_curv, self.lka_anchor_curvature + max_total_curv)
+      else:
+        target_curv = max(target_curv, self.lka_anchor_curvature - max_total_curv)
       # Non-ratcheting transparency clamp: fixed target_curv never feeds back on self.curvature
       # (zero snowball), while allowing the driver to manually steer further away from the line
       # without EPS holding the wheel back.

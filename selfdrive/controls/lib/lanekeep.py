@@ -36,19 +36,31 @@ OVERRIDE_ASSISTING_CAN_TORQUE = 185.0  # Raw CAN torque steering with the nudge 
 OVERRIDE_HOLD_CAN_TORQUE = 90.0        # Raw CAN torque keeping override cooldown latched
 OVERRIDE_CONFIRM_TIME_S = 0.05         # 50 ms debounce for CAN torque override
 OVERRIDE_COOLDOWN_S = 1.20             # Latched cooldown after override to prevent ON-OFF-ON pulsing
+POST_ARREST_STRAIGHTEN_CAN_TORQUE = 60.0  # Gentle opposing CAN torque releasing hold once drift stops
+POST_ARREST_CONFIRM_TIME_S = 0.04      # 40 ms debounce for post-arrest straightening release
+POST_ARREST_COOLDOWN_S = 0.50          # Brief cooldown after driver straightens out of an arrested drift
 CORNERING_GATE_ANGLE_DEG = 45.0        # degrees (suppress assist during active turns)
 APEX_CUT_BUFFER_M = 0.12               # meters (reduce trigger margin on inside curve apex)
 POST_BLINKER_COOLDOWN_S = 2.0          # seconds to wait after turn signal auto-cancels
 
 # S-Curve & 20 Hz Vision Velocity Smoothing Filters
-TAU_SMOOTH = 0.18
-TAU_OVERRIDE_RELEASE = 0.05
+TAU_SMOOTH = 0.24
+TAU_RELEASE = 0.08
+TAU_RDM_RELEASE = 0.18
+TAU_OVERRIDE_RELEASE = 0.04
 TAU_VEL = 0.16
+TAU_VEL_EDGE = 0.22
+TAU_POS_EDGE = 0.10
 MAX_D_DOT_MPS = 1.5
+MAX_EDGE_D_DOT_MPS = 1.0
 MIN_TTC_CLOSING_SPEED_MPS = 0.12
-TTC_EDGE_PROXIMITY_M = 0.16
+TTC_EDGE_PROXIMITY_M = 0.24
 TTC_CONFIRM_TIME_S = 0.08
-NUDGE_RELEASE_HYSTERESIS_M = 0.03
+NUDGE_RELEASE_HYSTERESIS_M = 0.02
+EDGE_RELEASE_HYSTERESIS_M = 0.09
+STRIPED_ROAD_MEMORY_S = 1.80
+EDGE_STD_ENTER = 0.55
+EDGE_STD_EXIT = 0.68
 ACTIVE_CURVATURE_EPS = 1.0e-4
 YELLOW_LINE_HOLD_S = 0.40
 
@@ -84,6 +96,7 @@ class LaneKeepController:
 
     # State variables
     self.active = False
+    self.nudge_active = False
     self.rdm_active = False
     self.desired_curvature = 0.0
     self.boundary_curvature = 0.0
@@ -103,10 +116,15 @@ class LaneKeepController:
     self._prev_d_right = None
     self._prev_d_edge_left = None
     self._prev_d_edge_right = None
+    self._filt_d_edge_left = None
+    self._filt_d_edge_right = None
     self._d_dot_left = 0.0
     self._d_dot_right = 0.0
     self._d_dot_edge_left = 0.0
     self._d_dot_edge_right = 0.0
+    self._edge_left_valid = False
+    self._edge_right_valid = False
+    self._striped_road_memory = 0.0
     self._left_line_curv = 0.0
     self._right_line_curv = 0.0
     self._left_edge_curv = 0.0
@@ -118,6 +136,7 @@ class LaneKeepController:
     self._ttc_edge_left_timer = 0.0
     self._ttc_edge_right_timer = 0.0
     self._override_confirm_timer = 0.0
+    self._straighten_confirm_timer = 0.0
     self._override_cooldown_left = 0.0
     self._override_cooldown_right = 0.0
     self._left_yellow_hold = 0.0
@@ -133,6 +152,7 @@ class LaneKeepController:
 
   def reset(self, full: bool = False):
     self.active = False
+    self.nudge_active = False
     self.rdm_active = False
     self.desired_curvature = 0.0
     self.boundary_curvature = 0.0
@@ -147,10 +167,15 @@ class LaneKeepController:
     self._prev_d_right = None
     self._prev_d_edge_left = None
     self._prev_d_edge_right = None
+    self._filt_d_edge_left = None
+    self._filt_d_edge_right = None
     self._d_dot_left = 0.0
     self._d_dot_right = 0.0
     self._d_dot_edge_left = 0.0
     self._d_dot_edge_right = 0.0
+    self._edge_left_valid = False
+    self._edge_right_valid = False
+    self._striped_road_memory = 0.0
     self._left_line_curv = 0.0
     self._right_line_curv = 0.0
     self._left_edge_curv = 0.0
@@ -162,6 +187,7 @@ class LaneKeepController:
     self._ttc_edge_left_timer = 0.0
     self._ttc_edge_right_timer = 0.0
     self._override_confirm_timer = 0.0
+    self._straighten_confirm_timer = 0.0
     self._override_cooldown_left = 0.0
     self._override_cooldown_right = 0.0
     self._left_yellow_hold = 0.0
@@ -254,14 +280,36 @@ class LaneKeepController:
       ttc_thresh = 0.75
       self.gradient_width = 0.30
 
-    d_edge_thresh = 0.12
-    ttc_edge_thresh = 0.95
-
     # 7. Extract Vision Data
     left_prob = float(model_v2.laneLineProbs[1]) if len(model_v2.laneLineProbs) > 1 else 0.0
     right_prob = float(model_v2.laneLineProbs[2]) if len(model_v2.laneLineProbs) > 2 else 0.0
     left_line_visible = left_prob >= 0.40
     right_line_visible = right_prob >= 0.40
+
+    # Painted-line priority with brief intersection paint-gap memory:
+    # - On striped roads (recent confident lane markings within 1.8s), RDM stays strictly conservative
+    #   so it NEVER interferes with normal painted-line LKA or triggers across brief intersection gaps.
+    # - On genuinely unstriped roads / driveways (_striped_road_memory expired, opposite line < 0.25, and
+    #   weak single-sided edge contrast < 0.65, or explicit ROAD_EDGE_ONLY mode), proactive RDM uses wider
+    #   margin and grass-edge hysteresis for early, continuous road-edge protection.
+    if (left_prob >= 0.65 and right_prob >= 0.45) or left_prob >= 0.80 or right_prob >= 0.80:
+      self._striped_road_memory = STRIPED_ROAD_MEMORY_S
+    elif self._striped_road_memory > 0.0:
+      self._striped_road_memory = max(0.0, self._striped_road_memory - dt)
+
+    unstriped_env_left = (mode == LaneKeepMode.ROAD_EDGE_ONLY) or (
+      self._striped_road_memory <= 0.0 and right_prob < 0.25 and left_prob < 0.65
+    )
+    unstriped_env_right = (mode == LaneKeepMode.ROAD_EDGE_ONLY) or (
+      self._striped_road_memory <= 0.0 and left_prob < 0.25 and right_prob < 0.65
+    )
+
+    d_edge_thresh_left = 0.28 if unstriped_env_left else 0.14
+    d_edge_thresh_right = 0.28 if unstriped_env_right else 0.14
+    ttc_edge_thresh_left = 1.15 if unstriped_env_left else 0.85
+    ttc_edge_thresh_right = 1.15 if unstriped_env_right else 0.85
+    ttc_edge_prox_left = TTC_EDGE_PROXIMITY_M if unstriped_env_left else 0.16
+    ttc_edge_prox_right = TTC_EDGE_PROXIMITY_M if unstriped_env_right else 0.16
 
     left_y = float(model_v2.laneLines[1].y[0]) if len(model_v2.laneLines) > 1 and len(model_v2.laneLines[1].y) > 0 else -1.8
     right_y = float(model_v2.laneLines[2].y[0]) if len(model_v2.laneLines) > 2 and len(model_v2.laneLines[2].y) > 0 else 1.8
@@ -270,8 +318,20 @@ class LaneKeepController:
     edge_right_y = float(model_v2.roadEdges[1].y[0]) if len(model_v2.roadEdges) > 1 and len(model_v2.roadEdges[1].y) > 0 else 2.5
     edge_left_std = float(model_v2.roadEdgeStds[0]) if len(model_v2.roadEdgeStds) > 0 else 1.0
     edge_right_std = float(model_v2.roadEdgeStds[1]) if len(model_v2.roadEdgeStds) > 1 else 1.0
-    edge_left_valid = edge_left_std < 0.50
-    edge_right_valid = edge_right_std < 0.50
+    std_enter_l = EDGE_STD_ENTER if unstriped_env_left else 0.50
+    std_exit_l = EDGE_STD_EXIT if unstriped_env_left else 0.50
+    std_enter_r = EDGE_STD_ENTER if unstriped_env_right else 0.50
+    std_exit_r = EDGE_STD_EXIT if unstriped_env_right else 0.50
+    if self._edge_left_valid:
+      self._edge_left_valid = edge_left_std < std_exit_l
+    else:
+      self._edge_left_valid = edge_left_std < std_enter_l
+    if self._edge_right_valid:
+      self._edge_right_valid = edge_right_std < std_exit_r
+    else:
+      self._edge_right_valid = edge_right_std < std_enter_r
+    edge_left_valid = self._edge_left_valid
+    edge_right_valid = self._edge_right_valid
 
     if model_updated or not self._curv_initialized:
       self._curv_initialized = True
@@ -280,11 +340,12 @@ class LaneKeepController:
       self._left_edge_curv = _estimate_boundary_curvature(model_v2.roadEdges[0]) if (edge_left_valid and len(model_v2.roadEdges) > 0) else 0.0
       self._right_edge_curv = _estimate_boundary_curvature(model_v2.roadEdges[1]) if (edge_right_valid and len(model_v2.roadEdges) > 1) else 0.0
 
-    # Distance to tire outer edges
+    # Distance to tire outer edges (road-edge position lightly EMA-filtered at 20 Hz to reject grass-edge jitter,
+    # while road-edge velocity is differentiated from raw_d_edge_* to preserve immediate TTC responsiveness)
     d_left = -left_y - (self.w_half + self.camera_offset)
     d_right = right_y - (self.w_half - self.camera_offset)
-    d_edge_left = -edge_left_y - (self.w_half + self.camera_offset)
-    d_edge_right = edge_right_y - (self.w_half - self.camera_offset)
+    raw_d_edge_left = -edge_left_y - (self.w_half + self.camera_offset)
+    raw_d_edge_right = edge_right_y - (self.w_half - self.camera_offset)
 
     # Lateral velocities updated strictly on 20 Hz modelV2 frames with EMA filtering
     # (prevents 5x derivative spikes from differentiating 20 Hz vision at 100 Hz DT_CTRL)
@@ -293,6 +354,8 @@ class LaneKeepController:
       dt_m = max(self._dt_since_model, 1e-3)
       self._dt_since_model = 0.0
       alpha_v = float(dt_m / (TAU_VEL + dt_m))
+      alpha_ve = float(dt_m / (TAU_VEL_EDGE + dt_m))
+      alpha_pe = float(dt_m / (TAU_POS_EDGE + dt_m))
 
       if left_line_visible:
         if self._prev_d_left is not None:
@@ -314,21 +377,44 @@ class LaneKeepController:
 
       if edge_left_valid:
         if self._prev_d_edge_left is not None:
-          raw_el = float(np.clip((d_edge_left - self._prev_d_edge_left) / dt_m, -MAX_D_DOT_MPS, MAX_D_DOT_MPS))
-          self._d_dot_edge_left = (1.0 - alpha_v) * self._d_dot_edge_left + alpha_v * raw_el
-        self._prev_d_edge_left = d_edge_left
+          raw_el = float(np.clip((raw_d_edge_left - self._prev_d_edge_left) / dt_m, -MAX_EDGE_D_DOT_MPS, 0.30))
+          self._d_dot_edge_left = (1.0 - alpha_ve) * self._d_dot_edge_left + alpha_ve * raw_el
+        self._prev_d_edge_left = raw_d_edge_left
+        if self._filt_d_edge_left is None:
+          self._filt_d_edge_left = raw_d_edge_left
+        else:
+          self._filt_d_edge_left = (1.0 - alpha_pe) * self._filt_d_edge_left + alpha_pe * raw_d_edge_left
       else:
         self._prev_d_edge_left = None
+        self._filt_d_edge_left = None
         self._d_dot_edge_left = 0.0
 
       if edge_right_valid:
         if self._prev_d_edge_right is not None:
-          raw_er = float(np.clip((d_edge_right - self._prev_d_edge_right) / dt_m, -MAX_D_DOT_MPS, MAX_D_DOT_MPS))
-          self._d_dot_edge_right = (1.0 - alpha_v) * self._d_dot_edge_right + alpha_v * raw_er
-        self._prev_d_edge_right = d_edge_right
+          raw_er = float(np.clip((raw_d_edge_right - self._prev_d_edge_right) / dt_m, -MAX_EDGE_D_DOT_MPS, 0.30))
+          self._d_dot_edge_right = (1.0 - alpha_ve) * self._d_dot_edge_right + alpha_ve * raw_er
+        self._prev_d_edge_right = raw_d_edge_right
+        if self._filt_d_edge_right is None:
+          self._filt_d_edge_right = raw_d_edge_right
+        else:
+          self._filt_d_edge_right = (1.0 - alpha_pe) * self._filt_d_edge_right + alpha_pe * raw_d_edge_right
       else:
         self._prev_d_edge_right = None
+        self._filt_d_edge_right = None
         self._d_dot_edge_right = 0.0
+
+    if not edge_left_valid:
+      self._filt_d_edge_left = None
+    elif self._filt_d_edge_left is None:
+      self._filt_d_edge_left = raw_d_edge_left
+
+    if not edge_right_valid:
+      self._filt_d_edge_right = None
+    elif self._filt_d_edge_right is None:
+      self._filt_d_edge_right = raw_d_edge_right
+
+    d_edge_left = self._filt_d_edge_left if self._filt_d_edge_left is not None else raw_d_edge_left
+    d_edge_right = self._filt_d_edge_right if self._filt_d_edge_right is not None else raw_d_edge_right
 
     d_dot_left = self._d_dot_left
     d_dot_right = self._d_dot_right
@@ -355,10 +441,8 @@ class LaneKeepController:
       ttc_prox_left = min(ttc_line_prox, max(0.0, (half_clearance - 0.06) - d_thresh_left))
       ttc_prox_right = min(ttc_line_prox, max(0.0, (half_clearance - 0.06) - d_thresh_right))
 
-    # Painted-line priority: when a painted line is visible (even faintly >= 0.20 prob),
-    # road-edge RDM must not trigger over top of it while the vehicle is inside the lane.
-    rdm_left_unstriped = left_prob < 0.20
-    rdm_right_unstriped = right_prob < 0.20
+    rdm_left_unstriped = (left_prob < 0.20) or unstriped_env_left
+    rdm_right_unstriped = (right_prob < 0.20) or unstriped_env_right
 
     # Proximity-gated & debounced TTC triggers
     if left_line_visible and d_left < (d_thresh_left + ttc_prox_left) and ttc_left < ttc_thresh:
@@ -371,25 +455,45 @@ class LaneKeepController:
     else:
       self._ttc_right_timer = 0.0
 
-    if edge_left_valid and rdm_left_unstriped and d_edge_left < (d_edge_thresh + TTC_EDGE_PROXIMITY_M) and ttc_edge_left < ttc_edge_thresh:
+    if edge_left_valid and rdm_left_unstriped and d_edge_left < (d_edge_thresh_left + ttc_edge_prox_left) and ttc_edge_left < ttc_edge_thresh_left:
       self._ttc_edge_left_timer += dt
     else:
       self._ttc_edge_left_timer = 0.0
 
-    if edge_right_valid and rdm_right_unstriped and d_edge_right < (d_edge_thresh + TTC_EDGE_PROXIMITY_M) and ttc_edge_right < ttc_edge_thresh:
+    if edge_right_valid and rdm_right_unstriped and d_edge_right < (d_edge_thresh_right + ttc_edge_prox_right) and ttc_edge_right < ttc_edge_thresh_right:
       self._ttc_edge_right_timer += dt
     else:
       self._ttc_edge_right_timer = 0.0
 
-    left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_left <= 0.02) else 0.0
-    right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_right <= 0.02) else 0.0
-    edge_left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_edge_left <= 0.02) else 0.0
-    edge_right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_edge_right <= 0.02) else 0.0
+    left_rdm_holding = (self._nudge_side == "left") or (self.rdm_active and self.active and self.desired_curvature > ACTIVE_CURVATURE_EPS)
+    right_rdm_holding = (self._nudge_side == "right") or (self.rdm_active and self.active and self.desired_curvature < -ACTIVE_CURVATURE_EPS)
+    left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_left <= 0.0) else 0.0
+    right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_right <= 0.0) else 0.0
+    edge_left_hyst = (EDGE_RELEASE_HYSTERESIS_M if unstriped_env_left else 0.03) if (left_rdm_holding and d_dot_edge_left <= 0.12) else 0.0
+    edge_right_hyst = (EDGE_RELEASE_HYSTERESIS_M if unstriped_env_right else 0.03) if (right_rdm_holding and d_dot_edge_right <= 0.12) else 0.0
 
-    sustain_left_line = (self._nudge_side == "left" and not self.rdm_active) and (d_left < d_thresh_left + ttc_prox_left + 0.02) and (d_dot_left <= 0.02)
-    sustain_right_line = (self._nudge_side == "right" and not self.rdm_active) and (d_right < d_thresh_right + ttc_prox_right + 0.02) and (d_dot_right <= 0.02)
-    sustain_rdm_left = (self._nudge_side == "left" and self.rdm_active) and rdm_left_unstriped and (d_edge_left < d_edge_thresh + TTC_EDGE_PROXIMITY_M + 0.02) and (d_dot_edge_left <= 0.02)
-    sustain_rdm_right = (self._nudge_side == "right" and self.rdm_active) and rdm_right_unstriped and (d_edge_right < d_edge_thresh + TTC_EDGE_PROXIMITY_M + 0.02) and (d_dot_edge_right <= 0.02)
+    sustain_left_line = (
+      (self._nudge_side == "left" and not self.rdm_active) and
+      (d_left < d_thresh_left + ttc_prox_left) and
+      (d_dot_left < -0.015)
+    )
+    sustain_right_line = (
+      (self._nudge_side == "right" and not self.rdm_active) and
+      (d_right < d_thresh_right + ttc_prox_right) and
+      (d_dot_right < -0.015)
+    )
+    sustain_rdm_left = (
+      (left_rdm_holding and self.rdm_active) and
+      rdm_left_unstriped and
+      (d_edge_left < d_edge_thresh_left + (0.12 if unstriped_env_left else ttc_edge_prox_left)) and
+      (d_dot_edge_left < (0.01 if unstriped_env_left else -0.015))
+    )
+    sustain_rdm_right = (
+      (right_rdm_holding and self.rdm_active) and
+      rdm_right_unstriped and
+      (d_edge_right < d_edge_thresh_right + (0.12 if unstriped_env_right else ttc_edge_prox_right)) and
+      (d_dot_edge_right < (0.01 if unstriped_env_right else -0.015))
+    )
 
     # 8. Candidate Trigger Detection (Left vs. Right before override cooldown gating)
     raw_trigger_left_line = (
@@ -414,7 +518,7 @@ class LaneKeepController:
       self._blinker_cooldown_left <= 0.0 and
       (
         (rdm_left_unstriped and (
-          d_edge_left < (d_edge_thresh + edge_left_hyst) or
+          d_edge_left < (d_edge_thresh_left + edge_left_hyst) or
           self._ttc_edge_left_timer >= TTC_CONFIRM_TIME_S or
           sustain_rdm_left
         )) or
@@ -428,7 +532,7 @@ class LaneKeepController:
       self._blinker_cooldown_right <= 0.0 and
       (
         (rdm_right_unstriped and (
-          d_edge_right < (d_edge_thresh + edge_right_hyst) or
+          d_edge_right < (d_edge_thresh_right + edge_right_hyst) or
           self._ttc_edge_right_timer >= TTC_CONFIRM_TIME_S or
           sustain_rdm_right
         )) or
@@ -442,7 +546,7 @@ class LaneKeepController:
       holding_left = (abs(steering_torque) > 0.35) if torque_unit_nm else (steering_torque > OVERRIDE_HOLD_CAN_TORQUE)
       left_returned_safe = (
         (not left_line_visible or d_left > d_thresh_left + 0.12) and
-        (not edge_left_valid or not rdm_left_unstriped or d_edge_left > d_edge_thresh + 0.15)
+        (not edge_left_valid or not rdm_left_unstriped or d_edge_left > d_edge_thresh_left + 0.15)
       )
       if holding_left:
         self._override_cooldown_left = max(self._override_cooldown_left - dt, 0.35)
@@ -455,7 +559,7 @@ class LaneKeepController:
       holding_right = (abs(steering_torque) > 0.35) if torque_unit_nm else (steering_torque < -OVERRIDE_HOLD_CAN_TORQUE)
       right_returned_safe = (
         (not right_line_visible or d_right > d_thresh_right + 0.12) and
-        (not edge_right_valid or not rdm_right_unstriped or d_edge_right > d_edge_thresh + 0.15)
+        (not edge_right_valid or not rdm_right_unstriped or d_edge_right > d_edge_thresh_right + 0.15)
       )
       if holding_right:
         self._override_cooldown_right = max(self._override_cooldown_right - dt, 0.35)
@@ -471,8 +575,10 @@ class LaneKeepController:
     else:
       candidate_side = None
 
+    post_arrest_release = False
     if torque_unit_nm:
       self._override_confirm_timer = 0.0
+      self._straighten_confirm_timer = 0.0
       driver_override = steering_pressed or abs(steering_torque) > OVERRIDE_TORQUE_THRESHOLD
     else:
       # Positive CAN steeringTorque = driver pushing LEFT; negative = driver pushing RIGHT.
@@ -493,11 +599,40 @@ class LaneKeepController:
         self._override_confirm_timer = 0.0
         driver_override = torque_exceeded
 
+      # Post-arrest gentle-straightening release: once outward painted-line drift has been arrested
+      # and the car is receding inward (or back inside threshold), allow light driver straightening
+      # pressure (> 60 CAN units) to seamlessly release the hold instead of countersteering.
+      if not driver_override and self.active and not self.rdm_active and self._intervention_timer >= 0.15:
+        if (
+          candidate_side == "left" and
+          (d_dot_left >= 0.02 or (d_left >= d_thresh_left and d_dot_left >= -0.005)) and
+          steering_torque > POST_ARREST_STRAIGHTEN_CAN_TORQUE
+        ):
+          self._straighten_confirm_timer += dt
+        elif (
+          candidate_side == "right" and
+          (d_dot_right >= 0.02 or (d_right >= d_thresh_right and d_dot_right >= -0.005)) and
+          steering_torque < -POST_ARREST_STRAIGHTEN_CAN_TORQUE
+        ):
+          self._straighten_confirm_timer += dt
+        else:
+          self._straighten_confirm_timer = 0.0
+        if self._straighten_confirm_timer >= POST_ARREST_CONFIRM_TIME_S:
+          post_arrest_release = True
+          self._straighten_confirm_timer = 0.0
+      else:
+        self._straighten_confirm_timer = 0.0
+
     if driver_override:
       if candidate_side == "left":
         self._override_cooldown_left = OVERRIDE_COOLDOWN_S
       elif candidate_side == "right":
         self._override_cooldown_right = OVERRIDE_COOLDOWN_S
+    elif post_arrest_release:
+      if candidate_side == "left":
+        self._override_cooldown_left = max(self._override_cooldown_left, POST_ARREST_COOLDOWN_S)
+      elif candidate_side == "right":
+        self._override_cooldown_right = max(self._override_cooldown_right, POST_ARREST_COOLDOWN_S)
 
     trigger_left_line = raw_trigger_left_line and (self._override_cooldown_left <= 0.0)
     trigger_rdm_left = raw_trigger_rdm_left and (self._override_cooldown_left <= 0.0)
@@ -505,8 +640,8 @@ class LaneKeepController:
     trigger_rdm_right = raw_trigger_rdm_right and (self._override_cooldown_right <= 0.0)
 
     if self._lockout:
-      left_clear = (not left_line_visible or d_left > d_thresh_left + 0.15) and (edge_left_std >= 0.50 or d_edge_left > d_edge_thresh + 0.15)
-      right_clear = (not right_line_visible or d_right > d_thresh_right + 0.15) and (edge_right_std >= 0.50 or d_edge_right > d_edge_thresh + 0.15)
+      left_clear = (not left_line_visible or d_left > d_thresh_left + 0.15) and (not edge_left_valid or d_edge_left > d_edge_thresh_left + 0.15)
+      right_clear = (not right_line_visible or d_right > d_thresh_right + 0.15) and (not edge_right_valid or d_edge_right > d_edge_thresh_right + 0.15)
       # Clear lockout once driver applies torque or vehicle returns safely inside boundaries
       if driver_override or (left_clear and right_clear):
         self._lockout = False
@@ -525,7 +660,7 @@ class LaneKeepController:
     kp = 0.0024
     kd = 0.0014
 
-    if not driver_override:
+    if not driver_override and not post_arrest_release:
       if trigger_rdm_left or trigger_left_line:
         is_left_nudge = True
         rdm_active = bool(trigger_rdm_left)
@@ -537,11 +672,12 @@ class LaneKeepController:
           self.boundary_curvature = (1.0 - alpha_b) * self.boundary_curvature + alpha_b * raw_b_curv
         if not self._lockout:
           d_cur = d_edge_left if trigger_rdm_left else d_left
-          d_lim = (d_edge_thresh + edge_left_hyst) if trigger_rdm_left else (d_thresh_left + left_hyst)
+          d_lim = (d_edge_thresh_left + edge_left_hyst) if trigger_rdm_left else (d_thresh_left + left_hyst)
           d_dot_cur = d_dot_edge_left if trigger_rdm_left else d_dot_left
           d_err = max(0.0, d_lim - d_cur)
-          vel_left = max(0.08 if (d_err <= 0.0 and d_dot_cur <= 0.02) else 0.0, -d_dot_cur)
-          recede_scale = max(0.0, 1.0 - (d_dot_cur / 0.10)) if d_dot_cur > 0.0 else 1.0
+          vel_left = max(0.0, -d_dot_cur)
+          recede_ref = 0.22 if trigger_rdm_left else 0.05
+          recede_scale = max(0.0, 1.0 - (d_dot_cur / recede_ref)) if d_dot_cur > 0.0 else 1.0
           # Positive curvature turns RIGHT away from left edge
           target_curvature = float((kp * d_err + kd * vel_left) * recede_scale)
       elif trigger_rdm_right or trigger_right_line:
@@ -555,17 +691,19 @@ class LaneKeepController:
           self.boundary_curvature = (1.0 - alpha_b) * self.boundary_curvature + alpha_b * raw_b_curv
         if not self._lockout:
           d_cur = d_edge_right if trigger_rdm_right else d_right
-          d_lim = (d_edge_thresh + edge_right_hyst) if trigger_rdm_right else (d_thresh_right + right_hyst)
+          d_lim = (d_edge_thresh_right + edge_right_hyst) if trigger_rdm_right else (d_thresh_right + right_hyst)
           d_dot_cur = d_dot_edge_right if trigger_rdm_right else d_dot_right
           d_err = max(0.0, d_lim - d_cur)
-          vel_right = max(0.08 if (d_err <= 0.0 and d_dot_cur <= 0.02) else 0.0, -d_dot_cur)
-          recede_scale = max(0.0, 1.0 - (d_dot_cur / 0.10)) if d_dot_cur > 0.0 else 1.0
+          vel_right = max(0.0, -d_dot_cur)
+          recede_ref = 0.22 if trigger_rdm_right else 0.05
+          recede_scale = max(0.0, 1.0 - (d_dot_cur / recede_ref)) if d_dot_cur > 0.0 else 1.0
           # Negative curvature turns LEFT away from right edge
           target_curvature = -float((kp * d_err + kd * vel_right) * recede_scale)
 
-    if is_left_nudge:
+    actively_nudging = (is_left_nudge or is_right_nudge) and abs(target_curvature) > 0.0
+    if is_left_nudge and abs(target_curvature) > 0.0:
       self._nudge_side = "left"
-    elif is_right_nudge:
+    elif is_right_nudge and abs(target_curvature) > 0.0:
       self._nudge_side = "right"
     else:
       self._nudge_side = None
@@ -577,8 +715,8 @@ class LaneKeepController:
 
     # 11. Anti-Lazy & RDM Authority Timer Progression
     nudge_active = is_left_nudge or is_right_nudge
-    override_active = driver_override or (self._override_cooldown_left > 0.0) or (self._override_cooldown_right > 0.0)
-    if nudge_active and not override_active and not self._lockout:
+    override_active = driver_override or post_arrest_release or (self._override_cooldown_left > 0.0) or (self._override_cooldown_right > 0.0)
+    if (actively_nudging or (nudge_active and self._lockout)) and not override_active and not self._lockout:
       self._intervention_timer += dt
       if rdm_active:
         self._rdm_timer += dt
@@ -608,23 +746,32 @@ class LaneKeepController:
       # Stage 1: Silent gentle nudge (0s - 8s)
       self.alert = LaneKeepAlert.NONE
 
-    # 12. S-Curve Envelope Smoothing Filter (fast release on driver override, no sticky EPS servo tail)
-    tau = TAU_OVERRIDE_RELEASE if override_active else TAU_SMOOTH
+    self.nudge_active = bool(actively_nudging and not override_active and not self._lockout)
+
+    # 12. Asymmetric S-Curve Envelope Smoothing Filter (gentle onset, crisp release, fast yield on override)
+    if override_active:
+      tau = TAU_OVERRIDE_RELEASE
+    elif abs(target_curvature) > abs(self._prev_curvature) and (target_curvature * self._prev_curvature >= 0.0):
+      tau = TAU_SMOOTH
+    elif rdm_active or self.rdm_active:
+      tau = TAU_RDM_RELEASE
+    else:
+      tau = TAU_RELEASE
     alpha = float(dt / (tau + dt))
     self.desired_curvature = (1.0 - alpha) * self._prev_curvature + alpha * target_curvature
-    if not nudge_active and abs(self.desired_curvature) <= ACTIVE_CURVATURE_EPS:
+    if abs(target_curvature) == 0.0 and abs(self.desired_curvature) <= ACTIVE_CURVATURE_EPS:
       self.desired_curvature = 0.0
     self._prev_curvature = self.desired_curvature
     self.desired_lat_accel = float(self.desired_curvature * (v_ego * v_ego))
 
     # 13. Active Actuation & Solid Cluster Line Visibility States
-    self.active = bool((nudge_active and abs(target_curvature) > 0.0) or abs(self.desired_curvature) > ACTIVE_CURVATURE_EPS)
-    if not self.active and not nudge_active:
+    self.active = bool(self.nudge_active or abs(self.desired_curvature) > ACTIVE_CURVATURE_EPS)
+    if not self.active and not self.nudge_active:
       self.boundary_curvature = 0.0
 
-    if is_left_nudge or (self.active and self.desired_curvature > ACTIVE_CURVATURE_EPS):
+    if (is_left_nudge and self.nudge_active) or (self.active and self.desired_curvature > ACTIVE_CURVATURE_EPS):
       active_side = "left"
-    elif is_right_nudge or (self.active and self.desired_curvature < -ACTIVE_CURVATURE_EPS):
+    elif (is_right_nudge and self.nudge_active) or (self.active and self.desired_curvature < -ACTIVE_CURVATURE_EPS):
       active_side = "right"
     else:
       active_side = None

@@ -3,7 +3,13 @@ import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
 from opendbc.car.common.filter_simple import FirstOrderFilter
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, apply_steer_angle_limits_vm, common_fault_avoidance
+from opendbc.car.lateral import (
+  AngleSteeringLimits,
+  apply_driver_steer_torque_limits,
+  apply_std_steer_angle_limits,
+  apply_steer_angle_limits_vm,
+  common_fault_avoidance,
+)
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.avh import AvhStartup
@@ -24,6 +30,11 @@ _ANGLE_REENGAGE_MAX_STEER_RATE = 2.0
 _LKA_REENGAGE_MAX_STEER_RATE = 25.0
 _LKA_OVERRIDE_TORQUE_HIGH = 140
 _LKA_OVERRIDE_TORQUE_LOW = 90
+_LKA_ANGLE_LIMITS = AngleSteeringLimits(
+  545,
+  ([0., 5., 15., 35.], [0.34, 0.24, 0.19, 0.115]),  # ~5.75 to 12 deg/s smooth LKA nudge onset
+  ([0., 5., 15., 35.], [0.38, 0.28, 0.22, 0.13]),   # smooth unwind back to live wheel angle
+)
 _ANGLE_MADS_MIN_SPEED = 0.44704
 _ANGLE_MADS_MAX_STEER_ANGLE = 120.0
 _ANGLE_STALL_ERROR_DEG = 5.0
@@ -160,6 +171,9 @@ class CarController(CarControllerBase):
     self.angle_handoff_active = False
     self.angle_stall_frames = 0
 
+  def _is_lka_nudge(self, CC) -> bool:
+    return bool(self.lka_nudge_active or (self.lka_armed and not getattr(CC, "enabled", False)))
+
   def _angle_manual_handoff(self, CS, lat_active, apply_angle=None, CC=None):
     if not lat_active:
       self._reset_angle_handoff()
@@ -167,7 +181,7 @@ class CarController(CarControllerBase):
 
     driver_override = self._update_angle_driver_override(CS, apply_angle=apply_angle, CC=CC)
     steering_rate = abs(getattr(CS.out, "steeringRateDeg", 0.0))
-    reengage_max_rate = _LKA_REENGAGE_MAX_STEER_RATE if self.lka_nudge_active else _ANGLE_REENGAGE_MAX_STEER_RATE
+    reengage_max_rate = _LKA_REENGAGE_MAX_STEER_RATE if self._is_lka_nudge(CC) else _ANGLE_REENGAGE_MAX_STEER_RATE
     if driver_override:
       self.angle_handoff_active = True
       return True
@@ -182,6 +196,21 @@ class CarController(CarControllerBase):
     if not self.angle_lkas_active and steering_rate > reengage_max_rate:
       self.angle_handoff_active = True
       return True
+
+    # Effortless manual recovery yield during LKA nudges: if the driver briskly steers
+    # past LKA's target further away from the boundary faster than _LKA_ANGLE_LIMITS,
+    # yield immediately instead of dragging behind the wheel until the 5.0 deg stall guard trips.
+    if self.angle_lkas_active and self._is_lka_nudge(CC):
+      hud = getattr(CC, "hudControl", None)
+      target_angle = float(getattr(getattr(CC, "actuators", None), "steeringAngleDeg", 0.0))
+      steer_angle = float(getattr(CS.out, "steeringAngleDeg", 0.0))
+      signed_rate = float(getattr(CS.out, "steeringRateDeg", 0.0))
+      if hud is not None and getattr(hud, "leftLaneDepart", False):
+        if steer_angle <= (target_angle + 0.3) and steer_angle < (self.apply_steer_last - 0.8) and signed_rate < -3.0:
+          return True
+      elif hud is not None and getattr(hud, "rightLaneDepart", False):
+        if steer_angle >= (target_angle - 0.3) and steer_angle > (self.apply_steer_last + 0.8) and signed_rate > 3.0:
+          return True
 
     # Stall guard: if commanded angle and actual wheel angle diverge significantly while
     # LKAS is active, the driver is holding the wheel against openpilot.
@@ -201,7 +230,7 @@ class CarController(CarControllerBase):
     """Debounce the higher-confidence raw torque override signal for angle cars."""
     raw_torque = float(getattr(CS.out, "steeringTorque", 0.0))
     abs_torque = abs(raw_torque)
-    if self.lka_nudge_active:
+    if self._is_lka_nudge(CC):
       hud = getattr(CC, "hudControl", None)
       steer_angle = float(getattr(CS.out, "steeringAngleDeg", 0.0))
       if hud is not None and getattr(hud, "leftLaneDepart", False):
@@ -249,6 +278,7 @@ class CarController(CarControllerBase):
 
     self.lka_armed = bool(getattr(CS, "lka_armed", False))
     self.lka_nudge_active = bool(getattr(CS, "lka_nudge_active", False))
+    is_lka_nudge = self._is_lka_nudge(CC)
 
     if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
       mads_only = CC.latActive and not CC.enabled
@@ -269,7 +299,7 @@ class CarController(CarControllerBase):
         CS.out.vEgoRaw,
         CS.out.steeringAngleDeg,
         lkas_active,
-        self.p.LEGACY_2025_ANGLE_LIMITS,
+        _LKA_ANGLE_LIMITS if is_lka_nudge else self.p.LEGACY_2025_ANGLE_LIMITS,
       )
       self.apply_steer_last = apply_steer
       self.angle_lkas_active = lkas_active
@@ -290,7 +320,7 @@ class CarController(CarControllerBase):
 
       if self.CP.carFingerprint == CAR.SUBARU_OUTBACK_2023:
         manual_handoff = not self.angle_lkas_active and \
-          abs(getattr(CS.out, "steeringRateDeg", 0.0)) > _ANGLE_REENGAGE_MAX_STEER_RATE
+          abs(getattr(CS.out, "steeringRateDeg", 0.0)) > (_LKA_REENGAGE_MAX_STEER_RATE if is_lka_nudge else _ANGLE_REENGAGE_MAX_STEER_RATE)
       else:
         manual_handoff = self._angle_manual_handoff(CS, lkas_available, apply_angle=apply_angle, CC=CC)
       lkas_active = lkas_available and not manual_handoff
@@ -301,7 +331,7 @@ class CarController(CarControllerBase):
         CS.out.vEgoRaw,
         CS.out.steeringAngleDeg,
         lkas_active,
-        self.p.FIXED_ANGLE_LIMITS,
+        _LKA_ANGLE_LIMITS if is_lka_nudge else self.p.FIXED_ANGLE_LIMITS,
       )
       self.apply_steer_last = apply_steer
       self.angle_lkas_active = lkas_active
@@ -442,13 +472,15 @@ class CarController(CarControllerBase):
         mads_ready = v_ego_raw > _ANGLE_MADS_MIN_SPEED and abs(steer_angle) < _ANGLE_MADS_MAX_STEER_ANGLE
       angle_rack_ready = bool(in_drive and not standstill and (not mads_only or mads_ready))
 
+      is_lka_nudge = self._is_lka_nudge(CC)
       if not CC.latActive:
-        self.angle_filter.x = actuators.steeringAngleDeg
+        self.angle_filter.x = steer_angle if is_lka_nudge else actuators.steeringAngleDeg
       elif not angle_rack_ready or self.angle_handoff_active or self.driver_override:
         self.angle_filter.x = steer_angle
-      elif self.lka_nudge_active:
-        # LaneKeepController already ramps curvature smoothly; avoid double-filtering LKA nudges.
-        self.angle_filter.x = actuators.steeringAngleDeg
+      elif is_lka_nudge:
+        # Light 30 ms micro-step smoother removes 20 Hz vision quantization without adding phase lag.
+        self.angle_filter.update_alpha(0.03)
+        self.angle_filter.update(actuators.steeringAngleDeg)
       else:
         self.angle_filter.update_alpha(float(np.interp(v_ego, [5.0, 10.0, 20.0], [0.3, 0.1, 0.0])))
         self.angle_filter.update(actuators.steeringAngleDeg)

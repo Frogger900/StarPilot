@@ -687,3 +687,141 @@ def test_boundary_curvature_drift_stopping_fade_and_yellow_hold():
 
   assert lka.desired_curvature < peak_curv * 0.5
   assert lka.left_line_state == 3
+
+
+def test_crisp_post_arrest_release_and_gentle_straightening_torque():
+  """Regression test for route 00000104--3888ad3412:
+  1) Once outward drift is arrested and the car recedes safely back inside d_thresh, LKA drops nudge_active
+     immediately and decays desired_curvature cleanly to zero without lingering countersteer.
+  2) Once outward drift has stopped (d_dot >= 0.02 m/s after >= 0.15s intervention), gentle driver
+     straightening pressure (> 60 CAN units, well below the 140 full opposing override) releases the hold.
+  """
+  # Part 1: Passive inward recession back across d_thresh=0.07m releases cleanly without sticky hold
+  lka = LaneKeepController()
+  v_ego = 40.0 * CV.MPH_TO_MS
+  drift_model = _make_model(left_y=-1.00, right_y=2.55)  # d_left = 0.04m < 0.07m
+  for step in range(25):
+    lka.update(drift_model, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert lka.active and lka.nudge_active
+
+  # Move gently inward across d_thresh to d_left = 0.12m (left_y = -1.08) and hold steady
+  for m_idx, ly in enumerate((-1.02, -1.05, -1.08)):
+    rec_m = _make_model(left_y=ly, right_y=2.55)
+    for sub in range(5):
+      lka.update(rec_m, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(sub == 0))
+  assert not lka.nudge_active
+
+  safe_m = _make_model(left_y=-1.08, right_y=2.55)
+  for step in range(30):
+    lka.update(safe_m, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert not lka.active
+  assert lka.desired_curvature == 0.0
+
+  # Part 2: Gentle driver straightening torque (75 CAN units > 60) once drift begins receding
+  lka2 = LaneKeepController()
+  for step in range(25):
+    lka2.update(drift_model, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert lka2.active and lka2.nudge_active
+
+  # Drift stops and recedes slightly (+0.30 m/s raw step -> filtered d_dot > 0.02 m/s while d_left=0.055m < 0.07m)
+  receding_near_line = _make_model(left_y=-1.015, right_y=2.55)
+  for sub in range(6):
+    lka2.update(
+      receding_near_line,
+      v_ego=v_ego,
+      steering_angle_deg=0.0,
+      steering_torque=75.0,
+      dt=0.01,
+      model_updated=(sub == 0),
+    )
+  assert not lka2.nudge_active
+  for sub in range(20):
+    lka2.update(receding_near_line, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=75.0, dt=0.01, model_updated=False)
+  assert not lka2.active
+  assert lka2.desired_curvature == 0.0
+
+
+def test_unstriped_driveway_rdm_with_phantom_single_sided_line_and_edge_std_hysteresis():
+  """Regression test for seg_030 driveway test on route 00000104--3888ad3412:
+  On an unstriped ~18 mph driveway/lane (right_prob < 0.25, no recent striped road memory) where vision
+  reports a weak single-sided phantom edge contrast (left_prob ~ 0.50 at d_left = +0.34m) while the real
+  grass edge sits at d_edge_left ~ 0.17..0.25m with 20 Hz std oscillating 0.52..0.63, RDM must trigger
+  early and hold continuously without choppy dropouts.
+  """
+  lka = LaneKeepController()
+  v_ego = 18.0 * CV.MPH_TO_MS
+  # Simulated 20 Hz driveway grass-edge trace: enters at d_edge_left=0.18m (std=0.52 < 0.55), then bounces
+  # +/-0.07m (up to raw d_edge_left=0.26m) and std=0.63 (< 0.68 exit hysteresis) without dropping out!
+  edge_trace = [
+    (-1.14, 0.52),  # raw d_edge_left = 0.18m
+    (-1.12, 0.58),  # raw d_edge_left = 0.16m
+    (-1.22, 0.63),  # raw d_edge_left = 0.26m (single-frame grass bounce)
+    (-1.13, 0.61),  # raw d_edge_left = 0.17m
+    (-1.21, 0.64),  # raw d_edge_left = 0.25m
+    (-1.14, 0.54),  # raw d_edge_left = 0.18m
+  ]
+  for edge_y, edge_std in edge_trace:
+    m = _make_model(
+      left_y=-1.30,
+      right_y=2.20,
+      left_prob=0.52,
+      right_prob=0.05,
+      edge_left_y=edge_y,
+      edge_right_y=2.60,
+      edge_left_std=edge_std,
+      edge_right_std=0.90,
+    )
+    for sub in range(5):
+      lka.update(
+        m,
+        v_ego=v_ego,
+        steering_angle_deg=0.0,
+        steering_torque=0.0,
+        min_activation_speed_mph=15.0,
+        dt=0.01,
+        model_updated=(sub == 0),
+      )
+      assert lka.active
+      assert lka.rdm_active
+      assert lka.is_red_gradient
+      assert lka.left_line_state == 3
+      assert lka.desired_curvature > 0.0
+
+
+def test_striped_road_memory_blocks_intersection_gap_false_rdm():
+  """Guarantees unstriped RDM enhancements never interfere on painted roads:
+  When crossing a brief (< 1.8s) intersection paint gap after driving on a striped road, a faded painted
+  line (left_prob = 0.48, d_left = 0.39m) still suppresses mid-lane RDM even if the opposite line briefly
+  drops to 0.10 and a curb/shoulder sits at d_edge_left = 0.18m.
+  """
+  lka = LaneKeepController()
+  v_ego = 35.0 * CV.MPH_TO_MS
+  striped = _make_model(left_y=-1.55, right_y=1.55, left_prob=0.88, right_prob=0.86)
+  for step in range(20):
+    lka.update(striped, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert not lka.active
+
+  # 1.0s intersection paint gap: right line vanishes (0.10), left line fades to 0.48 (still 0.39m clear),
+  # while a curb edge appears at d_edge_left = 0.18m (< 0.22m).
+  intersection_gap = _make_model(
+    left_y=-1.35,
+    right_y=1.75,
+    left_prob=0.48,
+    right_prob=0.10,
+    edge_left_y=-1.14,
+    edge_right_y=2.40,
+    edge_left_std=0.22,
+    edge_right_std=0.40,
+  )
+  for step in range(100):
+    lka.update(
+      intersection_gap,
+      v_ego=v_ego,
+      steering_angle_deg=0.0,
+      steering_torque=0.0,
+      dt=0.01,
+      model_updated=(step % 5 == 0),
+    )
+    assert not lka.active
+    assert not lka.rdm_active
+    assert lka.desired_curvature == 0.0
