@@ -2238,3 +2238,42 @@ def test_subaru_wheel_controls_cc_main_no_action_and_lkas_button_mapping(monkeyp
   assert ret.lkaArmed is True
   assert ret.alwaysOnLateralEnabled is False
   assert card.params_memory.get_int("WheelButtonBookmarkCounter") == 1
+
+
+def test_lka_strictly_gated_to_subaru_legacy_2025(monkeypatch, tmp_path):
+  monkeypatch.setattr(spc, "Params", FakeParams)
+  monkeypatch.setattr(spc, "ERROR_LOGS_PATH", tmp_path)
+
+  toggles = make_toggles(
+    always_on_lateral=True,
+    always_on_lateral_main=True,
+    always_on_lateral_lkas=True,
+    lkas_allowed_for_aol=True,
+    lkas_button_aol_toggle=True,
+    lane_keep_assist=True,  # Even if lingering True in Params on another car, LKA must never arm!
+  )
+  out = SimpleNamespace(distancePressed=False)
+
+  for brand, fingerprint in (("subaru", "SUBARU_OUTBACK_2023"), ("hyundai", "HYUNDAI_SONATA_2020")):
+    cp = SimpleNamespace(brand=brand, carFingerprint=fingerprint, flags=0)
+    fp = SimpleNamespace(alternativeExperience=spc.ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL)
+    card = spc.StarPilotCard(cp, fp)
+    sm = make_sm()
+
+    # Neither disarmed nor armed via Main Cruise / LKAS ever sets lkaArmed=True on non-SUBARU_LEGACY_2025
+    ret = card.update(make_car_state(available=True, enabled=False), out, sm, toggles)
+    assert ret.lkaArmed is False
+
+    ret = card.update(
+      make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+      out, sm, toggles,
+    )
+    assert ret.alwaysOnLateralEnabled is True
+    assert ret.lkaArmed is False
+
+    ret = card.update(
+      make_car_state(available=True, enabled=False, button_events=[SimpleNamespace(type=spc.ButtonType.lkas, pressed=True)]),
+      out, sm, toggles,
+    )
+    assert ret.alwaysOnLateralEnabled is False
+    assert ret.lkaArmed is False

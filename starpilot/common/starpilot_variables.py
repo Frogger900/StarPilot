@@ -818,10 +818,7 @@ class StarPilotVariables:
       "LaneCenteringE2EAuthority", cast=float, condition=toggle.lane_centering,
       default=1.0, min=0.0, max=1.0,
     )
-    toggle.lane_keep_assist = self.get_value("LaneKeepAssist", default=False)
-    toggle.lane_keep_mode = self.get_value("LaneKeepMode", cast=int, condition=toggle.lane_keep_assist, default=2, min=0, max=2)
-    toggle.lane_keep_sensitivity = self.get_value("LaneKeepSensitivity", cast=int, condition=toggle.lane_keep_assist, default=1, min=0, max=2)
-    toggle.lane_keep_min_speed = self.get_value("LaneKeepMinActivationSpeed", cast=float, condition=toggle.lane_keep_assist, default=25.0, min=15.0, max=45.0)
+
 
     advanced_longitudinal_tuning = toggle.openpilot_longitudinal and self.get_value("AdvancedLongitudinalTune")
     ev_vehicle = default_ev_tuning_enabled(CP)
@@ -909,6 +906,12 @@ class StarPilotVariables:
     toggle.force_fingerprint = self.get_value("ForceFingerprint", condition=car_model != self.default_values["CarModel"])
     if toggle.force_fingerprint:
       toggle.car_model = car_model
+
+    is_subaru_legacy_2025 = toggle.car_model == "SUBARU_LEGACY_2025"
+    toggle.lane_keep_assist = self.get_value("LaneKeepAssist", condition=is_subaru_legacy_2025, default=False)
+    toggle.lane_keep_min_speed = self.get_value(
+      "LaneKeepMinActivationSpeed", cast=float, condition=toggle.lane_keep_assist, default=25.0, min=15.0, max=45.0,
+    )
 
     self.migrate_prius_cluster_offset(str(toggle.car_model))
     toggle.cluster_offset = self.get_value("ClusterOffset", cast=float)

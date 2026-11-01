@@ -652,7 +652,12 @@ class StarPilotVehicleSettingsLayout(_SettingsPage):
     return titles.get(key, key)
 
   def _option_display_name(self, key: str, option_id: int, default_name: str) -> str:
-    if option_id == 9 and key == "LKASButtonControl" and self._params.get_bool("LaneKeepAssist"):
+    cs = starpilot_state.car_state
+    is_legacy_2025 = bool(
+      cs.isSubaruLegacy2025 or
+      (not cs.carModel and (self._params.get("CarModel") or "") == "SUBARU_LEGACY_2025")
+    )
+    if option_id == 9 and key == "LKASButtonControl" and is_legacy_2025 and self._params.get_bool("LaneKeepAssist"):
       return tr("Toggle AOL / LKA")
     return tr(default_name)
 

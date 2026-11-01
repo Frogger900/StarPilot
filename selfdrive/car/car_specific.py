@@ -89,6 +89,8 @@ class CarSpecificEvents:
     # StarPilot. Do not change wrong-gear handling for other Honda models.
     if self.CP.brand == 'honda' and self.CP.carFingerprint == 'HONDA_ACCORD_11G':
       extra_gears = [GearShifter.sport, GearShifter.brake]
+    elif self.CP.brand == 'subaru' and self.CP.carFingerprint == 'SUBARU_LEGACY_2025':
+      extra_gears = [GearShifter.manumatic]
 
     if self.CP.brand in ('body', 'mock'):
       events = Events()

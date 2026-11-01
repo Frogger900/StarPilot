@@ -21,6 +21,8 @@ class StarPilotCarState:
     isJeep: bool = False
     isToyota: bool = False
     isSubaru: bool = False
+    isSubaruLegacy2025: bool = False
+    carModel: str = ""
     isTesla: bool = False
     isVolt: bool = False
     isBolt: bool = False
@@ -106,7 +108,9 @@ class StarPilotState:
 
         if fallback_model:
             self.params.put("CarModel", fallback_model)
+            self.car_state.carModel = fallback_model
             self.car_state.isJeep = fallback_model.startswith("JEEP_")
+            self.car_state.isSubaruLegacy2025 = fallback_model == "SUBARU_LEGACY_2025"
 
         if not starpilot_toggles:
             self.car_state.hasOpenpilotLongitudinal = True
@@ -171,8 +175,10 @@ class StarPilotState:
             self.car_state.isFord = car_make == "ford"
             self.car_state.isHKG = car_make == "hyundai"
             self.car_state.isHKGCanFd = self.car_state.isHKG and safety_model == car.CarParams.SafetyModel.hyundaiCanfd
+            self.car_state.carModel = car_fingerprint
             self.car_state.isJeep = car_make == "chrysler" and car_fingerprint.startswith("JEEP_")
             self.car_state.isSubaru = car_make == "subaru"
+            self.car_state.isSubaruLegacy2025 = car_fingerprint == "SUBARU_LEGACY_2025"
             self.car_state.isTesla = car_make == "tesla"
             self.car_state.isToyota = car_make == "toyota"
             self.car_state.isTSK = bool(self._safe_get(CP, "secOcRequired", False))

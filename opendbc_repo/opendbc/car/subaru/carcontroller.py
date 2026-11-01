@@ -276,19 +276,24 @@ class CarController(CarControllerBase):
     if apply_angle is None:
       apply_angle = CC.actuators.steeringAngleDeg
 
-    self.lka_armed = bool(getattr(CS, "lka_armed", False))
-    self.lka_nudge_active = bool(getattr(CS, "lka_nudge_active", False))
+    is_legacy_2025 = self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025
+    self.lka_armed = is_legacy_2025 and bool(getattr(CS, "lka_armed", False))
+    self.lka_nudge_active = is_legacy_2025 and bool(getattr(CS, "lka_nudge_active", False))
     is_lka_nudge = self._is_lka_nudge(CC)
 
-    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+    if is_legacy_2025:
       mads_only = CC.latActive and not CC.enabled
       if mads_only:
         apply_angle = float(np.clip(apply_angle, -_LEGACY_2025_MADS_MAX_STEER_ANGLE, _LEGACY_2025_MADS_MAX_STEER_ANGLE))
 
       mads_only_ok = CS.out.vEgoRaw > _LEGACY_2025_MADS_MIN_SPEED and \
         abs(CS.out.steeringAngleDeg) <= (_LEGACY_2025_MADS_MAX_STEER_ANGLE + 10.0)
+      in_forward_gear = CS.out.gearShifter in (
+        structs.CarState.GearShifter.drive,
+        structs.CarState.GearShifter.manumatic,
+      )
       lkas_available = CC.latActive and (not mads_only or mads_only_ok) and \
-        CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
+        in_forward_gear and not CS.out.standstill
 
       manual_handoff = self._angle_manual_handoff(CS, lkas_available, apply_angle=apply_angle, CC=CC)
       lkas_active = lkas_available and not manual_handoff
@@ -411,10 +416,15 @@ class CarController(CarControllerBase):
     return msg
 
   def update(self, CC, CS, now_nanos, starpilot_toggles=None):
-    self.lka_armed = bool(getattr(CS, "lka_armed", False))
-    self.lka_nudge_active = bool(getattr(CS, "lka_nudge_active", False))
+    is_legacy_2025 = self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025
+    self.lka_armed = is_legacy_2025 and bool(getattr(CS, "lka_armed", False))
+    self.lka_nudge_active = is_legacy_2025 and bool(getattr(CS, "lka_nudge_active", False))
     cs_out = getattr(CS, "out", None)
-    in_drive = getattr(cs_out, "gearShifter", None) == structs.CarState.GearShifter.drive
+    gear_shifter = getattr(cs_out, "gearShifter", None)
+    if is_legacy_2025:
+      in_drive = gear_shifter in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.manumatic)
+    else:
+      in_drive = gear_shifter == structs.CarState.GearShifter.drive
     cruise_state = getattr(cs_out, "cruiseState", None)
     cruise_available = bool(cruise_state.available) if cruise_state is not None else bool(
       CC.enabled or CC.latActive or self.lka_armed or self.lka_nudge_active
@@ -553,7 +563,8 @@ class CarController(CarControllerBase):
         if getattr(CS, "es_lkas_state_msg", None) is not None:
           if not self.in_drive_and_cruise_available:
             # Cruise Main OFF (Cruise_On == 0) or shifted out of Drive:
-            # Hide BOTH the steering wheel icon (0) and lane lines (0) completely.
+            # On 2025 Legacy, keep the white "ready" steering wheel visible in P/R/N when Cruise Main is ON,
+            # while keeping cluster lane lines hidden (0) outside forward driving gears.
             self.lat_active_seen = False
             self.left_line_vis_debounced = None
             self.right_line_vis_debounced = None
@@ -561,7 +572,7 @@ class CarController(CarControllerBase):
             self.right_line_debounce_cnt = 0
             self.left_depart_latched = False
             self.right_depart_latched = False
-            wheel_ready = False
+            wheel_ready = bool(is_legacy_2025 and cruise_available)
             left_line = 0
             right_line = 0
             left_depart = False

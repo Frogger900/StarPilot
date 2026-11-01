@@ -56,3 +56,46 @@ def test_kia_ray_ev_allows_stock_cruise_to_enable_controls():
 
     assert captured["pcm_enable"] is True
     assert captured["ignore_cruise_state"] is ignore_cruise_state
+
+
+def test_subaru_legacy_2025_allows_manumatic_paddle_shift_gear_without_wrong_gear_event():
+  from cereal import log
+  from opendbc.car.subaru.values import CAR as SUBARU_CAR
+
+  GearShifter = car.CarState.GearShifter
+  EventName = log.OnroadEvent.EventName
+
+  def run_gear_check(fingerprint, gear):
+    cp = car.CarParams.new_message()
+    cp.brand = "subaru"
+    cp.carFingerprint = fingerprint
+    cp.pcmCruise = True
+    handler = CarSpecificEvents(cp)
+
+    cs = car.CarState.new_message()
+    cs.gearShifter = gear
+    cs.cruiseState.available = True
+    cs.cruiseState.enabled = True
+    cs.doorOpen = False
+    cs.seatbeltUnlatched = False
+
+    cs_prev = car.CarState.new_message()
+    cs_prev.gearShifter = GearShifter.drive
+    cs_prev.cruiseState.available = True
+    cs_prev.cruiseState.enabled = True
+
+    cc = car.CarControl.new_message()
+    events = handler.update(cs, cs_prev, cc)
+    return events
+
+  # 2025 Subaru Legacy allows CVT paddle-shifter manual mode (GearShifter.manumatic) without wrongGear fault
+  legacy_manumatic_events = run_gear_check(SUBARU_CAR.SUBARU_LEGACY_2025, GearShifter.manumatic)
+  assert EventName.wrongGear not in legacy_manumatic_events.names
+
+  # Park/Reverse/Neutral still emit wrongGear on 2025 Subaru Legacy when engaged
+  legacy_reverse_events = run_gear_check(SUBARU_CAR.SUBARU_LEGACY_2025, GearShifter.reverse)
+  assert EventName.wrongGear in legacy_reverse_events.names
+
+  # Other Subaru models remain strictly gated and still flag GearShifter.manumatic as wrongGear
+  outback_manumatic_events = run_gear_check(SUBARU_CAR.SUBARU_OUTBACK_2023, GearShifter.manumatic)
+  assert EventName.wrongGear in outback_manumatic_events.names

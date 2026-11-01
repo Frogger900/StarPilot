@@ -33,18 +33,6 @@ PANEL_STYLE = DEFAULT_PANEL_STYLE
 _LATERAL_TUNE_KEYS = ["TurnDesires", "NNFF", "NNFFLite", "ForceTorqueController"]
 _ADVANCED_LATERAL_KEYS = ["ForceAutoTune", "ForceAutoTuneOff"]
 
-_LANE_KEEP_MODE_OPTIONS = [
-  (1, tr_noop("Road Edge Only")),
-  (2, tr_noop("Lane Lines & Road Edge")),
-]
-
-_LANE_KEEP_SENSITIVITY_OPTIONS = [
-  (0, tr_noop("Late (0 in margin)")),
-  (1, tr_noop("Normal (8-10 in margin)")),
-  (2, tr_noop("Proactive (14-16 in margin)")),
-]
-
-
 def _sync_parent(params, parent_key, child_keys):
   if any(params.get_bool(k) for k in child_keys):
     if not params.get_bool(parent_key):
@@ -70,12 +58,15 @@ class SteeringManagerView(CardHubManagerView):
         "icon": "steering",
         "on_click": lambda: self._controller._navigate_to("behavior"),
       },
-      {
+    ]
+    if self._controller._supports_lane_keep():
+      cards.append({
         "title": tr("Lane Keep Assist"),
-        "desc": tr("Configure passive lane boundary nudges, road departure mitigation, sensitivity, and activation speed."),
+        "desc": tr("Configure passive lane-line boundary nudges and activation speed."),
         "icon": "road",
         "on_click": lambda: self._controller._navigate_to("lane_keep"),
-      },
+      })
+    cards.extend([
       {
         "title": tr("Lane Changes"),
         "desc": tr("Configure automatic lane changes, speed/width thresholds, and smoothing parameters."),
@@ -88,7 +79,7 @@ class SteeringManagerView(CardHubManagerView):
         "icon": "system",
         "on_click": lambda: self._controller._navigate_to("advanced"),
       },
-    ]
+    ])
     return cards
 
 
@@ -101,6 +92,13 @@ class StarPilotLateralLayout(_SettingsPage):
   def __init__(self):
     super().__init__()
     self._build_panels()
+
+  def _supports_lane_keep(self) -> bool:
+    cs = starpilot_state.car_state
+    return bool(
+      cs.isSubaruLegacy2025 or
+      (not cs.carModel and (self._params.get("CarModel") or "") == "SUBARU_LEGACY_2025")
+    )
 
   def _make_parent(self, key: str, label: str, subtitle: str = "") -> ParentToggle:
     return ParentToggle(
@@ -180,24 +178,6 @@ class StarPilotLateralLayout(_SettingsPage):
 
     # ── 2. Lane Keep Assist ──
     self._lane_keep_rows = [
-      SettingRow(
-        "LaneKeepMode", "value", tr_noop("Assistance Mode"),
-        subtitle=tr_noop("Assist on painted lane lines and road edges, or road edges only."),
-        get_value=self._get_lane_keep_mode_display,
-        on_click=lambda: self._show_labeled_select(
-          "Assistance Mode", "LaneKeepMode", _LANE_KEEP_MODE_OPTIONS, p.get_int("LaneKeepMode") or 2,
-        ),
-        visible=lka_on,
-      ),
-      SettingRow(
-        "LaneKeepSensitivity", "value", tr_noop("Intervention Sensitivity"),
-        subtitle=tr_noop("Distance from outer tire edge to boundary before countersteering starts."),
-        get_value=self._get_lane_keep_sensitivity_display,
-        on_click=lambda: self._show_labeled_select(
-          "Intervention Sensitivity", "LaneKeepSensitivity", _LANE_KEEP_SENSITIVITY_OPTIONS, p.get_int("LaneKeepSensitivity"),
-        ),
-        visible=lka_on,
-      ),
       SettingRow(
         "LaneKeepMinActivationSpeed", "value", tr_noop("Minimum Activation Speed"),
         subtitle=tr_noop("Speed floor above which Lane Keep Assist arms (includes 4 mph hysteresis)."),
@@ -393,8 +373,8 @@ class StarPilotLateralLayout(_SettingsPage):
       get_state=lambda: p.get_bool("AlwaysOnLateral"),
       set_state=lambda s: _confirm_reboot_toggle(p, "AlwaysOnLateral", s) if s else p.put_bool("AlwaysOnLateral", False),
     )
-    pt_lane_keep = self._make_parent("LaneKeepAssist", "Lane Keep Assist (LKA / RDM)",
-      "Gentle boundary nudges and road departure mitigation when manual steering.")
+    pt_lane_keep = self._make_parent("LaneKeepAssist", "Lane Keep Assist",
+      "Gentle passive lane-line nudges when manual steering.")
     pt_lane_changes = self._make_parent("LaneChanges", "Lane Changes",
       "Allow openpilot to change lanes.")
     pt_advanced = self._make_parent("AdvancedLateralTune", "Advanced Lateral Tuning",
@@ -412,8 +392,8 @@ class StarPilotLateralLayout(_SettingsPage):
     self._sub_panels["lane_keep"] = AetherSettingsView(
       self,
       [SettingSection(title="", rows=self._lane_keep_rows)],
-      header_title=tr_noop("Lane Keep Assist (LKA / RDM)"),
-      header_subtitle=tr_noop("Gentle passive boundary nudges and road departure mitigation when drifting toward lines without active centering."),
+      header_title=tr_noop("Lane Keep Assist"),
+      header_subtitle=tr_noop("Gentle passive lane-line nudges when drifting toward painted lines without active centering."),
       parent_toggle=pt_lane_keep,
       panel_style=PANEL_STYLE,
     )
@@ -434,20 +414,6 @@ class StarPilotLateralLayout(_SettingsPage):
       panel_style=PANEL_STYLE,
     )
     self._wire_sub_panels()
-
-  def _get_lane_keep_mode_display(self) -> str:
-    val = self._params.get_int("LaneKeepMode") or 2
-    for opt_val, label in _LANE_KEEP_MODE_OPTIONS:
-      if opt_val == val:
-        return tr(label)
-    return tr("Lane Lines & Road Edge")
-
-  def _get_lane_keep_sensitivity_display(self) -> str:
-    val = self._params.get_int("LaneKeepSensitivity")
-    for opt_val, label in _LANE_KEEP_SENSITIVITY_OPTIONS:
-      if opt_val == val:
-        return tr(label)
-    return tr("Normal (8-10 in margin)")
 
   def _on_pause_lateral_speed_clicked(self):
     def on_speed_close(res, val):

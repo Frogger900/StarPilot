@@ -29,8 +29,6 @@ from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringControl
 from openpilot.selfdrive.controls.lib.lanekeep import (
   LaneKeepAlert,
   LaneKeepController,
-  LaneKeepMode,
-  LaneKeepSensitivity,
 )
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
@@ -407,8 +405,10 @@ class Controls:
     self.lc_smooth_release = 0.0
     self.lane_centering = LaneCenteringController()
     self.lka = LaneKeepController()
-    self.lka_anchor_curvature = 0.0
+    self.lka_entry_curvature = 0.0
+    self.lka_entry_cooldown = 0.0
     self.lka_parallel_blend = 0.0
+    self.lka_release_blend = 0.0
     self.lka_was_active = False
     self.lka_armed_last = False
     self.lc_entry_sign = 0.0
@@ -558,7 +558,8 @@ class Controls:
                                         self.sm['starpilotPlan'].lateralCheck)
 
     centering_lat_active = bool(CC.latActive)
-    lka_armed_raw = bool(getattr(self.sm['starpilotCarState'], 'lkaArmed', False))
+    lka_supported = self.CP.carFingerprint == "SUBARU_LEGACY_2025"
+    lka_armed_raw = lka_supported and bool(getattr(self.sm['starpilotCarState'], 'lkaArmed', False))
     self.lka_armed_last = lka_armed_raw
     lka_can_run = (
       lka_armed_raw and
@@ -568,8 +569,6 @@ class Controls:
       self.sm.valid['modelV2']
     )
     if lka_can_run:
-      lka_mode = int(getattr(self.starpilot_toggles, "lane_keep_mode", LaneKeepMode.LANE_LINE_AND_ROAD_EDGE))
-      lka_sensitivity = int(getattr(self.starpilot_toggles, "lane_keep_sensitivity", LaneKeepSensitivity.NORMAL))
       lka_min_speed = float(getattr(self.starpilot_toggles, "lane_keep_min_speed", 25.0))
       self.lka.update(
         model_v2=model_v2,
@@ -580,8 +579,6 @@ class Controls:
         right_blinker=CS.rightBlinker,
         lat_active=centering_lat_active,
         steering_pressed=CS.steeringPressed,
-        mode=lka_mode,
-        sensitivity=lka_sensitivity,
         min_activation_speed_mph=lka_min_speed,
         dt=DT_CTRL,
         model_updated=bool(self.sm.updated['modelV2']),
@@ -592,12 +589,17 @@ class Controls:
 
     lka_actuating = (not centering_lat_active) and lka_can_run and self.lka.active
     if lka_actuating:
+      if not self.lka_was_active and self.lka_entry_cooldown <= 0.0:
+        self.lka_entry_curvature = self.curvature
       if not self.lka_was_active:
-        self.lka_anchor_curvature = self.curvature
         self.lka_parallel_blend = 0.0
+        self.lka_release_blend = 0.0
+      self.lka_entry_cooldown = 0.75
       CC.latActive = True
     else:
       self.lka_parallel_blend = 0.0
+      self.lka_release_blend = 0.0
+      self.lka_entry_cooldown = max(0.0, self.lka_entry_cooldown - DT_CTRL)
     self.lka_was_active = lka_actuating
 
     # EcuDisableFailed is set when car started in READY mode (ECU disable was rejected)
@@ -640,10 +642,9 @@ class Controls:
       self.lane_centering.reset()
       nudge_holding = bool(getattr(self.lka, "nudge_active", False))
       jerk_factor = 0.28 if nudge_holding else 0.38
-      # Guide smoothly toward the boundary line's own road curvature (clamped close to
-      # the fixed onset curvature, never ratcheted from live wheel feedback) plus LKA's
-      # drift-stopping nudge so the car aligns parallel to the line without snowballing
-      # across the lane, then unwind smoothly back to live wheel curvature on release.
+      # Guide smoothly toward the crossed painted lane line's own spatial curvature (never
+      # ratcheted from live wheel feedback across multi-wave bounces) plus LKA's drift-stopping
+      # nudge so the car aligns parallel to the line without pushing into mid-lane.
       b_curv = float(getattr(self.lka, "boundary_curvature", 0.0))
       v2_eff = max(CS.vEgo * CS.vEgo, 25.0)
       max_align_curv = 0.24 / v2_eff
@@ -651,31 +652,46 @@ class Controls:
         self.lka.desired_curvature == 0.0 and self.lka.left_line_state == 3
       )
       if nudge_right:
-        parallel_curv = max(self.lka_anchor_curvature, min(b_curv, self.lka_anchor_curvature + max_align_curv))
+        parallel_curv = min(b_curv, self.lka_entry_curvature + max_align_curv)
+        base_start = min(self.lka_entry_curvature, parallel_curv)
       else:
-        parallel_curv = min(self.lka_anchor_curvature, max(b_curv, self.lka_anchor_curvature - max_align_curv))
+        parallel_curv = max(b_curv, self.lka_entry_curvature - max_align_curv)
+        base_start = max(self.lka_entry_curvature, parallel_curv)
+
+      d_dot_cur = float(getattr(self.lka, "_d_dot_left" if nudge_right else "_d_dot_right", 0.0))
+      already_turning_inward = (self.curvature > b_curv + 2e-4) if nudge_right else (self.curvature < b_curv - 2e-4)
+      inward_driver_steer = bool(
+        CS.steeringPressed and
+        (d_dot_cur >= -0.01 or already_turning_inward) and (
+          (nudge_right and CS.steeringTorque < 0.0) or
+          (not nudge_right and CS.steeringTorque > 0.0)
+        )
+      )
       blend = float(getattr(self, "lka_parallel_blend", 0.0))
-      if nudge_holding:
+      rel_blend = float(getattr(self, "lka_release_blend", 0.0))
+      if nudge_holding and not inward_driver_steer:
         blend_target = min(1.0, abs(float(getattr(self.lka, "desired_lat_accel", 0.0))) / 0.16)
         blend += float(DT_CTRL / (0.26 + DT_CTRL)) * (blend_target - blend)
+        rel_blend += float(DT_CTRL / (0.12 + DT_CTRL)) * (0.0 - rel_blend)
       else:
-        blend += float(DT_CTRL / (0.07 + DT_CTRL)) * (0.0 - blend)
-        self.lka_anchor_curvature += float(DT_CTRL / (0.07 + DT_CTRL)) * (self.curvature - self.lka_anchor_curvature)
+        rel_tau = 0.04 if inward_driver_steer else 0.07
+        blend += float(DT_CTRL / (rel_tau + DT_CTRL)) * (0.0 - blend)
+        rel_blend += float(DT_CTRL / (rel_tau + DT_CTRL)) * (1.0 - rel_blend)
       self.lka_parallel_blend = blend
-      baseline_curv = self.lka_anchor_curvature + blend * (parallel_curv - self.lka_anchor_curvature)
-      target_curv = baseline_curv + self.lka.desired_curvature
-      max_total_curv = (0.52 if self.lka.rdm_active else 0.42) / v2_eff
+      self.lka_release_blend = rel_blend
+
+      baseline_curv = base_start + blend * (parallel_curv - base_start)
+      lka_offset = 0.0 if inward_driver_steer else float(self.lka.desired_curvature)
+      target_curv = baseline_curv + lka_offset
+      max_nudge_curv = 0.40 / v2_eff
+      max_entry_curv = 0.45 / v2_eff
       if nudge_right:
-        target_curv = min(target_curv, self.lka_anchor_curvature + max_total_curv)
+        target_curv = min(target_curv, parallel_curv + max_nudge_curv, self.lka_entry_curvature + max_entry_curv)
+        guided_curv = max(target_curv, self.curvature)
       else:
-        target_curv = max(target_curv, self.lka_anchor_curvature - max_total_curv)
-      # Non-ratcheting transparency clamp: fixed target_curv never feeds back on self.curvature
-      # (zero snowball), while allowing the driver to manually steer further away from the line
-      # without EPS holding the wheel back.
-      if nudge_right:
-        new_desired_curvature = max(target_curv, self.curvature)
-      else:
-        new_desired_curvature = min(target_curv, self.curvature)
+        target_curv = max(target_curv, parallel_curv - max_nudge_curv, self.lka_entry_curvature - max_entry_curv)
+        guided_curv = min(target_curv, self.curvature)
+      new_desired_curvature = guided_curv + rel_blend * (self.curvature - guided_curv)
     else:
       # Steering PID loop and lateral MPC
       # Reset desired curvature to current to avoid violating the limits on engage
@@ -990,10 +1006,8 @@ class Controls:
       hudControl.leftLaneDepart = bool(self.lka.left_line_state == 3)
       hudControl.rightLaneDepart = bool(self.lka.right_line_state == 3)
       if hudControl.visualAlert == car.CarControl.HUDControl.VisualAlert.none:
-        if self.lka.alert == LaneKeepAlert.KEEP_HANDS_ON_WHEEL:
+        if self.lka.alert in (LaneKeepAlert.KEEP_HANDS_ON_WHEEL, LaneKeepAlert.EMERGENCY_DEPARTURE):
           hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.steerRequired
-        elif self.lka.alert == LaneKeepAlert.EMERGENCY_DEPARTURE:
-          hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.ldw
     elif self.sm.valid['driverAssistance']:
       hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
       hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
@@ -1053,7 +1067,7 @@ class Controls:
     sp_lat = debug_dat.starpilotLateralState
     sp_lat.lkaArmed = bool(self.lka_armed_last)
     sp_lat.lkaActive = bool(self.lka.active)
-    sp_lat.lkaRdmActive = bool(self.lka.rdm_active)
+    sp_lat.lkaRdmActive = False
     sp_lat.lkaLeftLineState = int(self.lka.left_line_state)
     sp_lat.lkaRightLineState = int(self.lka.right_line_state)
     sp_lat.lkaAlert = int(self.lka.alert)

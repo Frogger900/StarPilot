@@ -24,7 +24,6 @@ MAX_DRAW_DISTANCE = 100.0
 STOCK_LANE_LINES_COLOR = rl.Color(255, 255, 255, 255)
 OCEAN_BLUE_LANE_LINES_COLOR = rl.Color(0, 176, 220, 255)
 LKA_AMBER_COLOR = rl.Color(255, 185, 0, 255)
-LKA_RED_COLOR = rl.Color(255, 35, 35, 255)
 DEFAULT_LANE_LINES_WIDTH = 4.0
 DEFAULT_PATH_EDGE_WIDTH = 20.0
 DEFAULT_PATH_WIDTH = 6.1
@@ -267,18 +266,14 @@ class ModelRenderer(Widget):
     unclipped_max_idx = self._get_path_length_idx(self._lane_lines[0].raw_points[:, 0], unclipped_max_distance)
 
     # Update lane lines and road edges using batched projection
-    lka_left, lka_right, lka_red, _, lka_width = self._lane_keep_visual_state()
+    lka_left, lka_right, _, lka_width = self._lane_keep_visual_state()
     lines = [*self._lane_lines, *self._road_edges]
     line_widths = [lane_line_width_m * prob for prob in self._lane_line_probs]
-    if lka_left and not lka_red and len(line_widths) > 1:
+    if lka_left and len(line_widths) > 1:
       line_widths[1] = max(line_widths[1], lka_width * 0.5)
-    if lka_right and not lka_red and len(line_widths) > 2:
+    if lka_right and len(line_widths) > 2:
       line_widths[2] = max(line_widths[2], lka_width * 0.5)
     edge_widths = [road_edge_width_m] * len(self._road_edges)
-    if lka_left and lka_red and len(edge_widths) > 0:
-      edge_widths[0] = max(edge_widths[0], lka_width * 0.5)
-    if lka_right and lka_red and len(edge_widths) > 1:
-      edge_widths[1] = max(edge_widths[1], lka_width * 0.5)
     widths = line_widths + edge_widths
     polygons = self._map_lines_to_polygons(
       [line.raw_points for line in lines], widths, 0.0, unclipped_max_idx, unclipped_max_distance, clip_by_lead=True
@@ -421,13 +416,13 @@ class ModelRenderer(Widget):
   def _lane_keep_visual_state(self):
     sm = ui_state.sm
     if sm.recv_frame.get("starpilotLateralState", 0) < ui_state.started_frame:
-      return False, False, False, 0.0, 0.30
+      return False, False, 0.0, 0.30
     return extract_lane_keep_visual_state(sm["starpilotLateralState"])
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
     lane_centering_direction = self._lane_centering_direction()
-    lka_left, lka_right, lka_red, lka_opacity, _ = self._lane_keep_visual_state()
+    lka_left, lka_right, lka_opacity, _ = self._lane_keep_visual_state()
 
     lane_lines_override = get_param_color(self._params, "LaneLinesColor", STOCK_LANE_LINES_COLOR.a)
     if lane_lines_override is not None:
@@ -447,8 +442,7 @@ class ModelRenderer(Widget):
       is_lka_nudge = (i == 1 and lka_left) or (i == 2 and lka_right)
 
       if is_lka_nudge:
-        line_color = LKA_RED_COLOR if lka_red else LKA_AMBER_COLOR
-        color = with_alpha(line_color, int(max(alpha, lka_opacity) * 255))
+        color = with_alpha(LKA_AMBER_COLOR, int(max(alpha, lka_opacity) * 255))
       elif lane_centering_line:
         line_color = OCEAN_BLUE_LANE_LINES_COLOR
         color = with_alpha(line_color, int(alpha * line_color.a))
@@ -463,11 +457,7 @@ class ModelRenderer(Widget):
         continue
 
       alpha = np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0)
-      is_edge_nudge = (i == 0 and lka_left and lka_red) or (i == 1 and lka_right and lka_red)
-      if is_edge_nudge:
-        color = rl.Color(255, 35, 35, int(max(alpha, lka_opacity) * 255))
-      else:
-        color = rl.Color(255, 0, 0, int(alpha * 255))
+      color = rl.Color(255, 0, 0, int(alpha * 255))
       draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_path(self, sm):

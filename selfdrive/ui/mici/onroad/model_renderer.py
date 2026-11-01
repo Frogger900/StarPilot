@@ -25,7 +25,6 @@ MAX_DRAW_DISTANCE = 100.0
 STOCK_LANE_LINES_COLOR = rl.Color(255, 255, 255, 255)
 OCEAN_BLUE_LANE_LINES_COLOR = rl.Color(0, 176, 220, 255)
 LKA_AMBER_COLOR = rl.Color(255, 185, 0, 255)
-LKA_RED_COLOR = rl.Color(255, 35, 35, 255)
 DEFAULT_LANE_LINES_WIDTH = 4.0
 DEFAULT_PATH_WIDTH = 6.1
 DEFAULT_ROAD_EDGES_WIDTH = 2.0
@@ -250,18 +249,14 @@ class ModelRenderer(Widget):
     max_distance = np.clip(path_x_array[-1], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE)
     max_idx = self._get_path_length_idx(self._lane_lines[0].raw_points[:, 0], max_distance)
 
-    lka_left, lka_right, lka_red, _, lka_width = self._lane_keep_visual_state()
+    lka_left, lka_right, _, lka_width = self._lane_keep_visual_state()
     line_widths = [0.12, 0.16, 0.16, 0.16] if lane_line_width is None else [lane_line_width] * 4
     widths = [width * probability for width, probability in zip(line_widths, self._lane_line_probs, strict=True)]
-    if lka_left and not lka_red:
+    if lka_left:
       widths[1] = max(widths[1], lka_width * 0.5)
-    if lka_right and not lka_red:
+    if lka_right:
       widths[2] = max(widths[2], lka_width * 0.5)
     edge_widths = [0.16 if road_edge_width is None else road_edge_width] * len(self._road_edges)
-    if lka_left and lka_red and len(edge_widths) > 0:
-      edge_widths[0] = max(edge_widths[0], lka_width * 0.5)
-    if lka_right and lka_red and len(edge_widths) > 1:
-      edge_widths[1] = max(edge_widths[1], lka_width * 0.5)
     widths.extend(edge_widths)
     lines = [*self._lane_lines, *self._road_edges]
     polygons = self._map_lines_to_polygons([line.raw_points for line in lines], widths, max_idx)
@@ -448,14 +443,14 @@ class ModelRenderer(Widget):
   def _lane_keep_visual_state(self):
     sm = ui_state.sm
     if sm.recv_frame.get("starpilotLateralState", 0) < ui_state.started_frame:
-      return False, False, False, 0.0, 0.30
+      return False, False, 0.0, 0.30
     return extract_lane_keep_visual_state(sm["starpilotLateralState"])
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
     """Two closest lines should be green (lane line or road edges)"""
     stock_scheme, edge_color, lane_color, lane_centering_direction = self._lane_line_palette()
-    lka_left, lka_right, lka_red, lka_opacity, _ = self._lane_keep_visual_state()
+    lka_left, lka_right, lka_opacity, _ = self._lane_keep_visual_state()
 
     for i, lane_line in enumerate(self._lane_lines):
       if lane_line.projected_points.size == 0:
@@ -463,9 +458,8 @@ class ModelRenderer(Widget):
 
       is_lka_nudge = (i == 1 and lka_left) or (i == 2 and lka_right)
       if is_lka_nudge:
-        line_color = LKA_RED_COLOR if lka_red else LKA_AMBER_COLOR
         alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
-        color = with_alpha(line_color, int(max(alpha, lka_opacity) * 255))
+        color = with_alpha(LKA_AMBER_COLOR, int(max(alpha, lka_opacity) * 255))
       else:
         color = self._get_ll_color(float(self._lane_line_probs[i]), i in (1, 2), i in (0, 1),
                                    stock_scheme, edge_color, lane_color, lane_centering_direction)
@@ -475,14 +469,9 @@ class ModelRenderer(Widget):
       if road_edge.projected_points.size == 0:
         continue
 
-      is_edge_nudge = (i == 0 and lka_left and lka_red) or (i == 1 and lka_right and lka_red)
-      if is_edge_nudge:
-        alpha = np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0)
-        color = rl.Color(255, 35, 35, int(max(alpha, lka_opacity) * 255))
-      else:
-        # if closest lane lines are not confident, make road edges green
-        color = self._get_ll_color(float(1.0 - self._road_edge_stds[i]), float(self._lane_line_probs[i + 1]) < 0.25, i == 0,
-                                   stock_scheme, edge_color, lane_color)
+      # if closest lane lines are not confident, make road edges green
+      color = self._get_ll_color(float(1.0 - self._road_edge_stds[i]), float(self._lane_line_probs[i + 1]) < 0.25, i == 0,
+                                 stock_scheme, edge_color, lane_color)
       draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_path(self, sm):

@@ -16,6 +16,10 @@ SUBARU_CRUISE_BUTTONS = {
   "Resume": ButtonType.accelCruise,
 }
 
+# 8-speed Lineartronic CVT simulated paddle-shift ratios 1..8 on 0x48 Transmission.Gear
+# (bits 0..2 = 0b001 Drive range, bits 3..6 = simulated gear 1..8, bit 7 = manual paddle mode)
+SUBARU_CVT_MANUAL_GEARS = frozenset({137, 145, 153, 161, 169, 177, 185, 193})
+
 
 class CarState(CarStateBase):
   def __init__(self, CP, FPCP):
@@ -89,7 +93,10 @@ class CarState(CarStateBase):
 
     cp_transmission = cp_alt if self.CP.flags & SubaruFlags.HYBRID else cp
     can_gear = int(cp_transmission.vl["Transmission"]["Gear"])
-    ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(can_gear, None))
+    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025 and can_gear in SUBARU_CVT_MANUAL_GEARS:
+      ret.gearShifter = structs.CarState.GearShifter.manumatic
+    else:
+      ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(can_gear, None))
 
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
       ret.steeringAngleDeg = cp_angle.vl["Steering_2"]["Steering_Angle"]

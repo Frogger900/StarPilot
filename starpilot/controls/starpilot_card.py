@@ -190,6 +190,12 @@ class StarPilotCard:
     self._controller_action_counters[key] = current
     return max(0, current - previous)
 
+  def _lka_supported_and_enabled(self, starpilot_toggles) -> bool:
+    return bool(
+      getattr(self.CP, "carFingerprint", None) == "SUBARU_LEGACY_2025" and
+      getattr(starpilot_toggles, "lane_keep_assist", False)
+    )
+
   def _toggle_controller_aol(self, carState, starpilot_toggles, main_cruise_aol=False):
     if not self.always_on_lateral_supported or not getattr(starpilot_toggles, "always_on_lateral", False):
       return False
@@ -213,7 +219,7 @@ class StarPilotCard:
     if self.hyundai_aol_needs_engagement:
       self.hyundai_aol_ready = True
     orthogonal_lka_mode = bool(
-      getattr(starpilot_toggles, "lane_keep_assist", False) and
+      self._lka_supported_and_enabled(starpilot_toggles) and
       (self.CP.brand == "hyundai" or getattr(starpilot_toggles, "lkas_allowed_for_aol", False))
     )
     if orthogonal_lka_mode:
@@ -342,7 +348,7 @@ class StarPilotCard:
     if getattr(self.CP, "carFingerprint", None) == HYUNDAI_CAR.HYUNDAI_SONATA_HYBRID:
       button_aol_supported = self.always_on_lateral_supported and bool(starpilot_toggles.lkas_allowed_for_aol)
     orthogonal_lka_mode = bool(
-      getattr(starpilot_toggles, "lane_keep_assist", False) and
+      self._lka_supported_and_enabled(starpilot_toggles) and
       (self.CP.brand == "hyundai" or starpilot_toggles.lkas_allowed_for_aol)
     )
     button_managed_aol = (
@@ -662,7 +668,7 @@ class StarPilotCard:
       else (not self.always_on_lateral_enabled and (not sm["selfdriveState"].active or self.pause_lateral))
     )
     lka_armed = (
-      bool(getattr(starpilot_toggles, "lane_keep_assist", False))
+      self._lka_supported_and_enabled(starpilot_toggles)
       and lka_mode_selected
       and bool(carState.cruiseState.available)
       and carState.gearShifter not in NON_DRIVING_GEARS

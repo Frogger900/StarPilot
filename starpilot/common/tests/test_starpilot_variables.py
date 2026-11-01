@@ -394,3 +394,31 @@ def test_non_toyota_software_cruise_keeps_custom_intervals():
   assert spv.software_cruise_intervals_available(True, "hyundai", False, True, True) is True
   assert spv.reverse_cruise_available(True, "hyundai", False) is False
   assert spv.speed_limit_controller_available(openpilot_longitudinal=False, redneck_cruise=False) is False
+
+
+def test_lanekeep_toggles_strictly_gated_to_subaru_legacy_2025(monkeypatch, tmp_path):
+  params_cls = spv.Params
+
+  def isolated_params(_path=None, memory=False, return_defaults=False):
+    return params_cls(str(tmp_path / ("memory" if memory else "params")), return_defaults=return_defaults)
+
+  monkeypatch.setattr(spv, "Params", isolated_params)
+  params = isolated_params()
+  params.put_bool("LaneKeepAssist", True)
+  params.put_float("LaneKeepMinActivationSpeed", 30.0)
+  params.put_bool("ForceFingerprint", True)
+
+  # 1. SUBARU_LEGACY_2025 enables lane_keep_assist and lane_keep_min_speed (with no removed mode/sensitivity attrs)
+  params.put("CarModel", "SUBARU_LEGACY_2025")
+  vars_legacy = spv.StarPilotVariables()
+  t_legacy = vars_legacy.starpilot_toggles
+  assert t_legacy.lane_keep_assist is True
+  assert t_legacy.lane_keep_min_speed == 30.0
+  assert not hasattr(t_legacy, "lane_keep_mode")
+  assert not hasattr(t_legacy, "lane_keep_sensitivity")
+
+  # 2. Non-2025-Legacy vehicle forces lane_keep_assist=False even if LaneKeepAssist=True in Params
+  params.put("CarModel", "SUBARU_OUTBACK_2023")
+  vars_other = spv.StarPilotVariables()
+  t_other = vars_other.starpilot_toggles
+  assert t_other.lane_keep_assist is False

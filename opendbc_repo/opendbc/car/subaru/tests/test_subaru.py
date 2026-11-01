@@ -1733,3 +1733,145 @@ def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw
   _, out_dat, _ = subarucan.create_ascent_lkas_alert(raw_idle, False, VisualAlert.steerRequired, armed=True)
   assert out_dat[2:5] == bytes.fromhex("000104")
   assert out_dat[5] == 0x22
+
+
+def test_legacy_2025_cvt_manual_paddle_shifter_gears_and_gating():
+  from opendbc.car.subaru.carstate import CarState, SUBARU_CVT_MANUAL_GEARS
+
+  assert SUBARU_CVT_MANUAL_GEARS == frozenset({137, 145, 153, 161, 169, 177, 185, 193})
+  toggles = SimpleNamespace(subaru_sng=False, subaru_redneck_cruise=False)
+
+  # 1. CarState on SUBARU_LEGACY_2025 decodes all 8 simulated CVT paddle-shift gears to GearShifter.manumatic
+  cp_legacy = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  cs_legacy = CarState(cp_legacy, cp_legacy)
+  parsers_legacy = CarState.get_can_parsers(cp_legacy)
+  cs_legacy.update(parsers_legacy, toggles)  # Register lazy CANParser signal subscriptions
+  packer_legacy = CANPacker(DBC[CAR.SUBARU_LEGACY_2025][Bus.pt])
+
+  for idx, raw_gear in enumerate(sorted(SUBARU_CVT_MANUAL_GEARS), start=1):
+    msgs = [
+      packer_legacy.make_can_msg("Transmission", CanBus.main_for_cp(cp_legacy), {"Gear": raw_gear, "COUNTER": idx % 16}),
+      packer_legacy.make_can_msg("ES_DashStatus", CanBus.camera, {"Cruise_On": 1, "COUNTER": idx % 16}),
+      packer_legacy.make_can_msg("ES_LKAS_State", CanBus.camera, {"LKAS_Dash_State": 2, "COUNTER": idx % 16}),
+      packer_legacy.make_can_msg("Steering_Torque", CanBus.main_for_cp(cp_legacy), {"Steer_Warning": 0, "COUNTER": idx % 16}),
+    ]
+    for parser in parsers_legacy.values():
+      parser.update([(idx, msgs)])
+    ret, _ = cs_legacy.update(parsers_legacy, toggles)
+    assert ret.gearShifter == structs.CarState.GearShifter.manumatic
+
+  # 2. Other Subaru models (e.g. SUBARU_OUTBACK_2023) remain strictly gated (decode raw 161 as GearShifter.unknown)
+  cp_outback = CarInterface.get_non_essential_params(CAR.SUBARU_OUTBACK_2023)
+  cs_outback = CarState(cp_outback, cp_outback)
+  parsers_outback = CarState.get_can_parsers(cp_outback)
+  cs_outback.update(parsers_outback, toggles)
+  packer_outback = CANPacker(DBC[CAR.SUBARU_OUTBACK_2023][Bus.pt])
+  outback_msgs = [
+    packer_outback.make_can_msg("Transmission", CanBus.main_for_cp(cp_outback), {"Gear": 161, "COUNTER": 1}),
+  ]
+  for parser in parsers_outback.values():
+    parser.update([(1, outback_msgs)])
+  ret_outback, _ = cs_outback.update(parsers_outback, toggles)
+  assert ret_outback.gearShifter == structs.CarState.GearShifter.unknown
+
+  # 3. CarController on SUBARU_LEGACY_2025 keeps steering actuation AND cluster lane lines active in GearShifter.manumatic
+  controller = CarController({}, cp_legacy)
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  angle_parser = CANParser(dbc, [("ES_LKAS_ANGLE", 0)], controller.angle_bus)
+  state_parser = CANParser(dbc, [("ES_LKAS_State", 0)], controller.status_bus)
+
+  CC = SimpleNamespace(
+    enabled=True, latActive=True, longActive=False,
+    actuators=SimpleNamespace(steeringAngleDeg=2.5, accel=0.0),
+    hudControl=SimpleNamespace(
+      visualAlert=VisualAlert.none, leadVisible=False,
+      leftLaneVisible=True, rightLaneVisible=True,
+      leftLaneDepart=False, rightLaneDepart=False,
+    ),
+    cruiseControl=SimpleNamespace(cancel=False),
+  )
+  CS = SimpleNamespace(
+    lka_armed=False,
+    lka_nudge_active=False,
+    out=SimpleNamespace(
+      vEgo=18.0, vEgoRaw=18.0, steeringAngleDeg=2.0, steeringRateDeg=1.0, steeringTorque=0.0,
+      gearShifter=structs.CarState.GearShifter.manumatic, standstill=False,
+      canValid=True, leftBlinker=False, rightBlinker=False,
+      cruiseState=SimpleNamespace(available=True),
+    ),
+    es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
+  )
+  controller.frame = 0
+  _, can_sends = controller.update(CC, CS, 0)
+  angle_parser.update([(1, [m for m in can_sends if m[0] == 0x124])])
+  state_parser.update([(1, [m for m in can_sends if m[0] in (0x122, 0x322)])])
+  assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
+
+
+def test_legacy_2025_park_reverse_neutral_white_ready_wheel_and_gating():
+  cp_legacy = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller_legacy = CarController({}, cp_legacy)
+  dbc_legacy = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  angle_parser = CANParser(dbc_legacy, [("ES_LKAS_ANGLE", 0)], controller_legacy.angle_bus)
+  state_parser = CANParser(dbc_legacy, [("ES_LKAS_State", 0)], controller_legacy.status_bus)
+
+  CC = SimpleNamespace(
+    enabled=False, latActive=False, longActive=False,
+    actuators=SimpleNamespace(steeringAngleDeg=4.0, accel=0.0),
+    hudControl=SimpleNamespace(
+      visualAlert=VisualAlert.none, leadVisible=False,
+      leftLaneVisible=True, rightLaneVisible=True,
+      leftLaneDepart=True, rightLaneDepart=False,
+    ),
+    cruiseControl=SimpleNamespace(cancel=False),
+  )
+  CS = SimpleNamespace(
+    lka_armed=True,
+    lka_nudge_active=False,
+    out=SimpleNamespace(
+      vEgo=0.0, vEgoRaw=0.0, steeringAngleDeg=0.0, steeringRateDeg=0.0, steeringTorque=0.0,
+      gearShifter=structs.CarState.GearShifter.park, standstill=True,
+      canValid=True, leftBlinker=False, rightBlinker=False,
+      cruiseState=SimpleNamespace(available=True),
+    ),
+    es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
+  )
+
+  # 1. SUBARU_LEGACY_2025 with Cruise Main ON in Park, Reverse, Neutral:
+  # shows white ready wheel (LKAS_Dash_State == 1) while keeping lines hidden (0) and steering disabled (0)
+  for idx, gear in enumerate((
+    structs.CarState.GearShifter.park,
+    structs.CarState.GearShifter.reverse,
+    structs.CarState.GearShifter.neutral,
+  ), start=1):
+    CS.out.gearShifter = gear
+    controller_legacy.frame = idx * 10
+    _, can_sends = controller_legacy.update(CC, CS, idx * 100_000_000)
+    angle_parser.update([(idx, [m for m in can_sends if m[0] == 0x124])])
+    state_parser.update([(idx, [m for m in can_sends if m[0] in (0x122, 0x322)])])
+    assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
+    assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+    assert state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+    assert state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+  # When Cruise Main is OFF in Park, wheel icon turns off (0)
+  CS.out.cruiseState.available = False
+  CS.out.gearShifter = structs.CarState.GearShifter.park
+  controller_legacy.frame = 40
+  _, can_sends = controller_legacy.update(CC, CS, 400_000_000)
+  state_parser.update([(4, [m for m in can_sends if m[0] in (0x122, 0x322)])])
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
+
+  # 2. Non-2025-Legacy Subaru (e.g. SUBARU_OUTBACK_2023) keeps wheel icon hidden (0) in Park even with Cruise Main ON
+  cp_outback = CarInterface.get_non_essential_params(CAR.SUBARU_OUTBACK_2023)
+  controller_outback = CarController({}, cp_outback)
+  dbc_outback = DBC[CAR.SUBARU_OUTBACK_2023][Bus.pt]
+  outback_state_parser = CANParser(dbc_outback, [("ES_LKAS_State", 0)], controller_outback.status_bus)
+  CS.out.cruiseState.available = True
+  controller_outback.frame = 10
+  _, outback_sends = controller_outback.update(CC, CS, 100_000_000)
+  outback_state_parser.update([(1, [m for m in outback_sends if m[0] in (0x122, 0x322)])])
+  assert outback_state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0

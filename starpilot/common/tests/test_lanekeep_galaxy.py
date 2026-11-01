@@ -23,33 +23,25 @@ def _sections():
 def test_lanekeep_is_in_lateral_section():
   sections = _sections()
   lateral = sections["Lateral (Steering)"]
-  keys = {"LaneKeepAssist", "LaneKeepMode", "LaneKeepSensitivity", "LaneKeepMinActivationSpeed"}
-
-  assert keys <= lateral.keys()
+  assert {"LaneKeepAssist", "LaneKeepMinActivationSpeed"} <= lateral.keys()
+  assert "LaneKeepMode" not in lateral
+  assert "LaneKeepSensitivity" not in lateral
 
 
 def test_lanekeep_galaxy_controls():
   lateral = _sections()["Lateral (Steering)"]
   lka = lateral["LaneKeepAssist"]
-  mode = lateral["LaneKeepMode"]
-  sensitivity = lateral["LaneKeepSensitivity"]
   min_speed = lateral["LaneKeepMinActivationSpeed"]
 
+  assert lka["label"] == "Lane Keep Assist"
   assert lka["ui_type"] == "toggle"
   assert lka["is_parent_toggle"] is True
   assert lka["data_type"] == "bool"
   assert lka["default"] is False
   assert lka["settings_tier"] == "simple"
-
-  assert mode["ui_type"] == "dropdown"
-  assert mode["parent_key"] == "LaneKeepAssist"
-  assert len(mode["options"]) == 2
-  assert mode["settings_tier"] == "simple"
-
-  assert sensitivity["ui_type"] == "dropdown"
-  assert sensitivity["parent_key"] == "LaneKeepAssist"
-  assert len(sensitivity["options"]) == 3
-  assert sensitivity["settings_tier"] == "simple"
+  assert lka["requires_capability"] == "SupportsLaneKeepAssist"
+  assert "rdm" not in (lka["label"] + " " + lka["description"]).lower()
+  assert "road departure" not in (lka["label"] + " " + lka["description"]).lower()
 
   assert min_speed["ui_type"] == "numeric"
   assert min_speed["parent_key"] == "LaneKeepAssist"
@@ -57,6 +49,7 @@ def test_lanekeep_galaxy_controls():
   assert min_speed["max"] == 45.0
   assert min_speed["step"] == 1.0
   assert min_speed["settings_tier"] == "simple"
+  assert min_speed["requires_capability"] == "SupportsLaneKeepAssist"
 
 
 def test_params_keys_no_duplicates_and_lka_persistence_declarations():
@@ -68,8 +61,6 @@ def test_params_keys_no_duplicates_and_lka_persistence_declarations():
 
   expected_defaults = {
     "LaneKeepAssist": ("BOOL", "0"),
-    "LaneKeepMode": ("INT", "2"),
-    "LaneKeepSensitivity": ("INT", "1"),
     "LaneKeepMinActivationSpeed": ("FLOAT", "25.0"),
     "LastLateralModeCentering": ("BOOL", "1"),
   }
@@ -88,14 +79,19 @@ def test_params_keys_no_duplicates_and_lka_persistence_declarations():
   assert set(expected_defaults.keys()) <= feasible
 
 
-def test_the_galaxy_has_no_raw_file_fallback_bandaid():
+def test_the_galaxy_has_no_raw_file_fallback_bandaid_and_exposes_capability():
   galaxy_source = _THE_GALAXY_PATH.read_text(encoding="utf-8")
   assert "_safe_params_put" not in galaxy_source
+  assert "_get_supports_lane_keep_assist" in galaxy_source
+  assert '"SupportsLaneKeepAssist"' in galaxy_source
 
 
 def test_on_device_lateral_settings_exposes_lanekeep_controls():
   lateral_ui = _LATERAL_UI_PATH.read_text(encoding="utf-8")
   assert '_make_parent("LaneKeepAssist"' in lateral_ui
-  assert '"LaneKeepMode"' in lateral_ui
-  assert '"LaneKeepSensitivity"' in lateral_ui
   assert '"LaneKeepMinActivationSpeed"' in lateral_ui
+  assert '"LaneKeepMode"' not in lateral_ui
+  assert '"LaneKeepSensitivity"' not in lateral_ui
+  assert "_supports_lane_keep" in lateral_ui
+  assert "rdm" not in lateral_ui.lower()
+  assert "road departure" not in lateral_ui.lower()

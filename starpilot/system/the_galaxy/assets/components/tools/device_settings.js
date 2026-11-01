@@ -455,9 +455,14 @@ function syncInputs() {
     }
 
     if (Array.isArray(inlineOptions) && inlineOptions.length > 0) {
-      if (!el.dataset.hydrated) {
-        applySelectOptions(el, inlineOptions)
-        el.dataset.hydrated = "1"
+      const lkaLabelActive = key === "LKASButtonControl" && Boolean(state.values.SupportsLaneKeepAssist && state.values.LaneKeepAssist)
+      const hydrationKey = lkaLabelActive ? "1-lka" : "1"
+      if (el.dataset.hydrated !== hydrationKey) {
+        const resolvedOptions = lkaLabelActive
+          ? inlineOptions.map(opt => (Number(opt.value) === 9 ? { ...opt, label: "Toggle Always On Lateral / LKA" } : opt))
+          : inlineOptions
+        applySelectOptions(el, resolvedOptions)
+        el.dataset.hydrated = hydrationKey
       }
       syncSelectValue(el, key)
     }

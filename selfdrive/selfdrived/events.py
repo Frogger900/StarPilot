@@ -1288,9 +1288,9 @@ STARPILOT_EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   StarPilotEventName.lkaEmergencyDeparture: {
     ET.WARNING: Alert(
       "TAKE CONTROL IMMEDIATELY",
-      "Road Departure Detected",
+      "Lane Keep Assist Timed Out",
       AlertStatus.critical, AlertSize.full,
-      Priority.HIGHEST, VisualAlert.ldw, AudibleAlert.warningImmediate, 2.),
+      Priority.HIGHEST, VisualAlert.steerRequired, AudibleAlert.warningImmediate, 2.),
   },
 
   StarPilotEventName.pedalNotCalibrated: {

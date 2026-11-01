@@ -246,6 +246,7 @@ class StarPilotOnroadView(AugmentedRoadView):
         "HasRivianAngleHarness": (
           getattr(cp, "brand", "") == "rivian" and bool(int(getattr(cp, "flags", 0)) & (1 << 0))
         ),
+        "SupportsLaneKeepAssist": getattr(cp, "carFingerprint", "") == "SUBARU_LEGACY_2025",
       },
     )
 

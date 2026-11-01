@@ -3442,7 +3442,10 @@ def _get_favorite_slot_options():
 def _get_available_favorite_slot_options():
   return filter_favorite_slot_options(
     _get_favorite_slot_options(),
-    {"HasRivianAngleHarness": _get_has_rivian_angle_harness()},
+    {
+      "HasRivianAngleHarness": _get_has_rivian_angle_harness(),
+      "SupportsLaneKeepAssist": _get_supports_lane_keep_assist(),
+    },
   )
 
 
@@ -4502,6 +4505,32 @@ def _get_has_rivian_angle_harness():
   except Exception:
     return False
 
+
+def _get_supports_lane_keep_assist():
+  force_fp = _safe_params_get_bool("ForceFingerprint")
+  raw_model = _safe_params_get_live_raw("CarModel")
+  if isinstance(raw_model, bytes):
+    stored_model = raw_model.decode("utf-8", errors="replace").strip()
+  else:
+    stored_model = str(raw_model or "").strip()
+
+  cp_fingerprint = ""
+  cp_bytes = _safe_params_get_live_raw("CarParamsPersistent")
+  if cp_bytes:
+    try:
+      with car.CarParams.from_bytes(cp_bytes) as cp:
+        cp_fingerprint = str(getattr(cp, "carFingerprint", "") or "").strip()
+    except Exception:
+      cp_fingerprint = ""
+
+  if force_fp and stored_model and stored_model.upper() not in ("DEFAULT", "MOCK"):
+    effective_model = stored_model
+  elif cp_fingerprint and cp_fingerprint.upper() != "MOCK":
+    effective_model = cp_fingerprint
+  else:
+    effective_model = stored_model
+  return effective_model == "SUBARU_LEGACY_2025"
+
 def _get_hardware_snapshot_items():
   starpilot_toggles = _get_starpilot_toggles_snapshot()
 
@@ -4690,6 +4719,8 @@ def _build_troubleshoot_payload():
       if key in shown or key not in registered or key.startswith('LaneCentering') or key == 'LaneCenterOffset':
         continue
       if (entry.get("requires_capability") == "HasRivianAngleHarness" and not _get_has_rivian_angle_harness()):
+        continue
+      if (entry.get("requires_capability") == "SupportsLaneKeepAssist" and not _get_supports_lane_keep_assist()):
         continue
       if key == "TeslaWakeOnCAN" and not supports_tesla_can_wake(params):
         continue
@@ -6655,6 +6686,7 @@ def setup(app):
           params.put("CarMake", make_label)
           updated["CarMake"] = make_label
 
+        updated["SupportsLaneKeepAssist"] = _get_supports_lane_keep_assist()
         update_starpilot_toggles()
         return jsonify({
           "message": f"Fingerprint set to '{model_label or selected_model}'.",
@@ -6838,6 +6870,7 @@ def setup(app):
     result["VehicleParked"] = _get_vehicle_parked()
     result["AlphaLongitudinalAvailable"] = _get_alpha_longitudinal_available()
     result["HasRivianAngleHarness"] = _get_has_rivian_angle_harness()
+    result["SupportsLaneKeepAssist"] = _get_supports_lane_keep_assist()
     result["IsTiciOrTizi"] = _get_is_tici_or_tizi()
 
     for key in ("CalibratedLateralAcceleration", "CalibrationProgress"):

@@ -70,7 +70,11 @@ export const GalaxyToggleCard = {
     isSelect() { return this.param.ui_type === "dropdown" },
     isSwitch() { return !this.isNumeric && !this.isColor && !this.isAction && !this.isFavorites && !this.isGroup && !this.isReadout && !this.isSelect && !this.isText },
     selectOptions() {
-      return this.param.options || this.endpointOptions || []
+      const base = this.param.options || this.endpointOptions || []
+      if (this.param.key === "LKASButtonControl" && Boolean(this.values?.SupportsLaneKeepAssist && this.values?.LaneKeepAssist)) {
+        return base.map(opt => (Number(opt.value) === 9 ? { ...opt, label: "Toggle Always On Lateral / LKA" } : opt))
+      }
+      return base
     },
     optionsLoading() {
       return Boolean(this.param.options_endpoint) && this.endpointLoading
