@@ -309,7 +309,13 @@ def create_es_infotainment(packer, frame, es_infotainment_msg, visual_alert, bus
   return packer.make_can_msg("ES_Infotainment", bus, values)
 
 
-def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert, armed: bool = False):
+def create_ascent_lkas_alert(
+  raw_dat: bytes,
+  lateral_active: bool,
+  visual_alert,
+  armed: bool = False,
+  acc_lead_visible: bool = False,
+):
   address = 0x3C4
   if len(raw_dat) != 8 or raw_dat[0] != (((address & 0xff) + (address >> 8) + sum(raw_dat[1:])) & 0xff):
     return None
@@ -321,14 +327,21 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert,
     # Suppress all background EyeSight centering/toggle/hands-off alerts whenever Cruise Main is armed,
     # while preserving stock FCW (0x01, 0x02, 0x0e), native LDW (0x0b, 0x0c), and opaque status bits in dat[5:].
     if dat[2] in (0x19, 0x1b, 0x1c, 0x1e) or (
-      dat[2] == 0x00 and ((dat[3] in (0x01, 0x07) and dat[4] == 0x04) or (dat[3] == 0x00 and dat[4] in (0x02, 0x30)))
+      dat[2] == 0x00 and (
+        (dat[3] in (0x01, 0x07) and dat[4] in (0x04, 0x30)) or
+        (dat[3] == 0x00 and dat[4] in (0x02, 0x30))
+      )
     ):
       if not (visual_alert == VisualAlert.steerRequired and dat[2:5] == b"\x00\x01\x04"):
         dat[2:5] = b"\x00\x00\x00"
         changed = True
-    if visual_alert == VisualAlert.steerRequired and dat[2:5] == b"\x00\x00\x00":
-      dat[3:5] = b"\x01\x04"
-      changed = True
+    if visual_alert == VisualAlert.steerRequired:
+      if dat[2:5] == b"\x00\x00\x00":
+        dat[3:5] = b"\x01\x04"
+        changed = True
+      if dat[2:5] == b"\x00\x01\x04" and dat[5] == 0x01:
+        dat[5] = 0x00
+        changed = True
 
   if lateral_active and visual_alert != VisualAlert.steerRequired:
     if dat[2:] == b"\x00\x01\x04\x00\x00\x00":
@@ -338,6 +351,14 @@ def create_ascent_lkas_alert(raw_dat: bytes, lateral_active: bool, visual_alert,
       # Suppress stock lane-centering toggle chime/LED while preserving native LDW (0x0b, 0x0c, 000005, 000006)
       dat[2:5] = b"\x00\x00\x00"
       changed = True
+
+  # When EyeSight's internal background LKAS hands-off warning/cancel (000104, 1c0704, 000704, 1e0030)
+  # is active on Bus 2, EyeSight clears dat[5] (the center green ACC lead-car windshield LED) from 0x01 -> 0x00
+  # to make room for its LKAS warning LED in dat[4]. Once that background LKAS alert is scrubbed above and no
+  # genuine warning alert occupies dat[2:5], restore dat[5] = 0x01 while ACC is actively tracking a lead vehicle.
+  if acc_lead_visible and dat[2:5] == b"\x00\x00\x00" and dat[5] == 0x00:
+    dat[5] = 0x01
+    changed = True
 
   if changed:
     dat[0] = ((address & 0xff) + (address >> 8) + sum(dat[1:])) & 0xff

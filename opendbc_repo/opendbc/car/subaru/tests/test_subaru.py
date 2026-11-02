@@ -1875,3 +1875,80 @@ def test_legacy_2025_park_reverse_neutral_white_ready_wheel_and_gating():
   _, outback_sends = controller_outback.update(CC, CS, 100_000_000)
   outback_state_parser.update([(1, [m for m in outback_sends if m[0] in (0x122, 0x322)])])
   assert outback_state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
+
+
+def test_legacy_2025_acc_lead_car_green_windshield_hud_light_preserved():
+  def make_3c4(counter, payload3_hex, tail3_hex="000000"):
+    raw = bytearray.fromhex(f"00{counter:02x}{payload3_hex}{tail3_hex}")
+    raw[0] = (0xc4 + 3 + sum(raw[1:])) & 0xff
+    return bytes(raw)
+
+  def valid_3c4_checksum(dat: bytes) -> bool:
+    return len(dat) == 8 and dat[0] == ((0xc4 + 3 + sum(dat[1:])) & 0xff)
+
+  # 1. All background EyeSight LKAS hands-off / timeout / toggle payloads (where EyeSight drops dat[5] to 0x00)
+  # restore dat[5] = 0x01 (single center green windshield LED) when ACC is actively tracking a lead car!
+  for idx, bg_hex in enumerate(("000104", "1c0704", "000704", "1e0030", "000030", "1b0002", "000002", "190000")):
+    raw = make_3c4(idx % 16, bg_hex, "000000")
+    _, out_dat, _ = subarucan.create_ascent_lkas_alert(
+      raw, True, VisualAlert.none, armed=True, acc_lead_visible=True,
+    )
+    assert valid_3c4_checksum(out_dat)
+    assert out_dat[2:] == bytes.fromhex("000000010000")
+
+  # 2. When lead car disappears or ACC disengages (acc_lead_visible=False) while EyeSight is latched in 1e0030,
+  # dat[5] immediately turns OFF (0x00)!
+  raw_latched = make_3c4(9, "1e0030", "000000")
+  _, out_off, _ = subarucan.create_ascent_lkas_alert(
+    raw_latched, True, VisualAlert.none, armed=True, acc_lead_visible=False,
+  )
+  assert valid_3c4_checksum(out_off)
+  assert out_off[2:] == bytes.fromhex("000000000000")
+
+  # 3. Genuine high-priority alerts (FCW, native LDW, openpilot steerRequired) take HUD LED priority over dat[5]=0x01
+  for alert_hex in ("010104", "0b0005", "0c0006"):
+    raw_alert = make_3c4(10, alert_hex, "000000")
+    _, out_alert, _ = subarucan.create_ascent_lkas_alert(
+      raw_alert, True, VisualAlert.none, armed=True, acc_lead_visible=True,
+    )
+    assert valid_3c4_checksum(out_alert)
+    assert out_alert[2:5] == bytes.fromhex(alert_hex)
+    assert out_alert[5] == 0x00
+
+  raw_green = make_3c4(11, "000000", "010000")
+  _, out_steer_req, _ = subarucan.create_ascent_lkas_alert(
+    raw_green, True, VisualAlert.steerRequired, armed=True, acc_lead_visible=True,
+  )
+  assert valid_3c4_checksum(out_steer_req)
+  assert out_steer_req[2:] == bytes.fromhex("000104000000")
+
+  # 4. End-to-end CarController.update check with ES_DashStatus (Cruise_Activated + Car_Follow)
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  CP.flags |= SubaruFlags.ASCENT_LKAS_ALERT.value
+  controller = CarController({}, CP)
+  CC = structs.CarControl(enabled=True, latActive=True)
+  CS = SimpleNamespace(
+    out=structs.CarState(
+      vEgo=20.0,
+      vEgoRaw=20.0,
+      gearShifter=structs.CarState.GearShifter.drive,
+      cruiseState=structs.CarState.CruiseState(available=True, enabled=True),
+    ),
+    es_dashstatus_msg=defaultdict(int, {"Cruise_On": 1, "Cruise_Activated": 1, "Car_Follow": 1}),
+    es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
+    es_lkas_alert_dat=make_3c4(1, "1e0030", "000000"),
+  )
+  _, sends_lead = controller.update(CC.as_reader(), CS, 0)
+  tx_3c4_lead = [m for m in sends_lead if m[0] == 0x3C4]
+  assert len(tx_3c4_lead) == 1
+  assert valid_3c4_checksum(tx_3c4_lead[0][1])
+  assert tx_3c4_lead[0][1][2:] == bytes.fromhex("000000010000")
+
+  # Lead car pulls away (Car_Follow -> 0): green windshield light extinguishes immediately
+  CS.es_dashstatus_msg["Car_Follow"] = 0
+  CS.es_lkas_alert_dat = make_3c4(2, "1e0030", "000000")
+  _, sends_nolead = controller.update(CC.as_reader(), CS, 50_000_000)
+  tx_3c4_nolead = [m for m in sends_nolead if m[0] == 0x3C4]
+  assert len(tx_3c4_nolead) == 1
+  assert valid_3c4_checksum(tx_3c4_nolead[0][1])
+  assert tx_3c4_nolead[0][1][2:] == bytes.fromhex("000000000000")

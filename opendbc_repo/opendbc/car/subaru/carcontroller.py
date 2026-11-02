@@ -409,7 +409,20 @@ class CarController(CarControllerBase):
     dat = getattr(CS, "es_lkas_alert_dat", b"")
     cruise_state = getattr(getattr(CS, "out", None), "cruiseState", None)
     armed = bool(cruise_state.available) if cruise_state is not None else False
-    msg = subarucan.create_ascent_lkas_alert(dat, self.angle_lkas_active, CC.hudControl.visualAlert, armed=armed)
+    dashstatus_msg = getattr(CS, "es_dashstatus_msg", None)
+    if self.CP.openpilotLongitudinalControl:
+      acc_lead_visible = bool(getattr(CC, "enabled", False) and getattr(CC.hudControl, "leadVisible", False))
+    elif dashstatus_msg:
+      acc_lead_visible = bool(dashstatus_msg.get("Cruise_Activated", 0) and dashstatus_msg.get("Car_Follow", 0))
+    else:
+      acc_lead_visible = False
+    msg = subarucan.create_ascent_lkas_alert(
+      dat,
+      self.angle_lkas_active,
+      CC.hudControl.visualAlert,
+      armed=armed,
+      acc_lead_visible=acc_lead_visible,
+    )
     if msg is None or (dat[1] & 0xf) == self.ascent_lkas_alert_counter_last:
       return None
     self.ascent_lkas_alert_counter_last = dat[1] & 0xf
