@@ -591,15 +591,18 @@ class Controls:
     if lka_actuating:
       if not self.lka_was_active and self.lka_entry_cooldown <= 0.0:
         self.lka_entry_curvature = self.curvature
-      if not self.lka_was_active:
         self.lka_parallel_blend = 0.0
+      if not self.lka_was_active:
         self.lka_release_blend = 0.0
       self.lka_entry_cooldown = 0.75
       CC.latActive = True
     else:
-      self.lka_parallel_blend = 0.0
-      self.lka_release_blend = 0.0
       self.lka_entry_cooldown = max(0.0, self.lka_entry_cooldown - DT_CTRL)
+      if self.lka_entry_cooldown <= 0.0:
+        self.lka_parallel_blend = 0.0
+      else:
+        self.lka_parallel_blend *= float(0.25 / (0.25 + DT_CTRL))
+      self.lka_release_blend = 0.0
     self.lka_was_active = lka_actuating
 
     # EcuDisableFailed is set when car started in READY mode (ECU disable was rejected)
@@ -652,9 +655,13 @@ class Controls:
         self.lka.desired_curvature == 0.0 and self.lka.left_line_state == 3
       )
       if nudge_right:
+        if self.curvature > self.lka_entry_curvature and b_curv > self.lka_entry_curvature:
+          self.lka_entry_curvature = max(self.lka_entry_curvature, min(self.curvature, b_curv))
         parallel_curv = min(b_curv, self.lka_entry_curvature + max_align_curv)
         base_start = min(self.lka_entry_curvature, parallel_curv)
       else:
+        if self.curvature < self.lka_entry_curvature and b_curv < self.lka_entry_curvature:
+          self.lka_entry_curvature = min(self.lka_entry_curvature, max(self.curvature, b_curv))
         parallel_curv = max(b_curv, self.lka_entry_curvature - max_align_curv)
         base_start = max(self.lka_entry_curvature, parallel_curv)
 
@@ -682,8 +689,17 @@ class Controls:
 
       baseline_curv = base_start + blend * (parallel_curv - base_start)
       lka_offset = 0.0 if inward_driver_steer else float(self.lka.desired_curvature)
+      # Once outward drift has slowed/stopped and the car's actual curvature has already
+      # caught up to the boundary's parallel curvature, attenuate excess inward offset so
+      # LKA holds parallel to the line instead of shoving back toward lane center.
+      curve_aligned = (
+        (nudge_right and self.curvature > 1.5e-4 and self.curvature >= parallel_curv - 1.0e-4) or
+        (not nudge_right and self.curvature < -1.5e-4 and self.curvature <= parallel_curv + 1.0e-4)
+      )
+      drift_arrested_frac = float(np.clip((d_dot_cur + 0.02) / 0.025, 0.0, 1.0)) if curve_aligned else 0.0
+      lka_offset *= (1.0 - 0.65 * drift_arrested_frac)
       target_curv = baseline_curv + lka_offset
-      max_nudge_curv = 0.40 / v2_eff
+      max_nudge_curv = (0.40 - 0.22 * drift_arrested_frac) / v2_eff
       max_entry_curv = 0.45 / v2_eff
       if nudge_right:
         target_curv = min(target_curv, parallel_curv + max_nudge_curv, self.lka_entry_curvature + max_entry_curv)

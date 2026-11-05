@@ -1952,3 +1952,143 @@ def test_legacy_2025_acc_lead_car_green_windshield_hud_light_preserved():
   assert len(tx_3c4_nolead) == 1
   assert valid_3c4_checksum(tx_3c4_nolead[0][1])
   assert tx_3c4_nolead[0][1][2:] == bytes.fromhex("000000000000")
+
+
+def test_legacy_2025_mads_green_wheel_park_standstill_override_and_mode_switch():
+  """Verify on 2025 Subaru Legacy:
+  1) When MADS/AOL is enabled (aol_allowed=True, lka_armed=False) with Cruise Main ON:
+     - Steering wheel icon (LKAS_Dash_State) stays GREEN (2) in Park, Reverse, Neutral,
+       at a standstill in Drive (even when CC.latActive=False), and while driving!
+     - Overriding MADS with steering torque turns the wheel icon WHITE (1) both while
+       driving and while stopped/parked, and releasing torque restores GREEN (2).
+  2) When LKA is enabled (lka_armed=True, aol_allowed=False) with Cruise Main ON:
+     - Steering wheel icon stays WHITE (1) in Park, Reverse, Neutral, at standstill,
+       in passive standby, and during active LKA nudges.
+  3) Switching from MADS to LKA standby (lka_armed=True, lka_nudge_active=False) immediately
+     drops LKAS_Request to 0 without a 2-tick overlap even if CC.latActive is still True.
+  4) Already-latched amber departure line (3) on 0x322 is not truncated by the 45-deg cornering gate.
+  """
+  cp_legacy = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
+  controller = CarController({}, cp_legacy)
+  dbc = DBC[CAR.SUBARU_LEGACY_2025][Bus.pt]
+  angle_parser = CANParser(dbc, [("ES_LKAS_ANGLE", 0)], controller.angle_bus)
+  state_parser = CANParser(dbc, [("ES_LKAS_State", 0)], controller.status_bus)
+
+  CC = SimpleNamespace(
+    enabled=False, latActive=False, longActive=False,
+    actuators=SimpleNamespace(steeringAngleDeg=0.0, accel=0.0),
+    hudControl=SimpleNamespace(
+      visualAlert=VisualAlert.none, leadVisible=False,
+      leftLaneVisible=True, rightLaneVisible=True,
+      leftLaneDepart=False, rightLaneDepart=False,
+    ),
+    cruiseControl=SimpleNamespace(cancel=False),
+  )
+  CS = SimpleNamespace(
+    lka_armed=False,
+    lka_nudge_active=False,
+    aol_allowed=True,
+    aol_enabled=False,
+    out=SimpleNamespace(
+      vEgo=0.0, vEgoRaw=0.0, steeringAngleDeg=0.0, steeringRateDeg=0.0, steeringTorque=0.0,
+      gearShifter=structs.CarState.GearShifter.park, standstill=True,
+      canValid=True, leftBlinker=False, rightBlinker=False,
+      cruiseState=SimpleNamespace(available=True),
+    ),
+    es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1}),
+  )
+
+  seq = 0
+  def step_ctrl(n_frames=1):
+    nonlocal seq
+    for _ in range(n_frames):
+      controller.frame = seq * 10
+      _, sends = controller.update(CC, CS, seq * 100_000_000)
+      seq += 1
+      a_msgs = [m for m in sends if m[0] == 0x124]
+      s_msgs = [m for m in sends if m[0] in (0x122, 0x322)]
+      if a_msgs:
+        angle_parser.update([(seq, a_msgs)])
+      if s_msgs:
+        state_parser.update([(seq, s_msgs)])
+
+  # 1. MADS enabled while parked in P, R, N (CC.latActive=False, aol_allowed=True): GREEN wheel (2), lines hidden (0)
+  for gear in (
+    structs.CarState.GearShifter.park,
+    structs.CarState.GearShifter.reverse,
+    structs.CarState.GearShifter.neutral,
+  ):
+    CS.out.gearShifter = gear
+    step_ctrl()
+    assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
+    assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+    assert state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+    assert state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+  # 2. Toggling to LKA mode while still in Park (aol_allowed=False, lka_armed=False): immediately turns WHITE (1)!
+  CS.out.gearShifter = structs.CarState.GearShifter.park
+  CS.aol_allowed = False
+  step_ctrl()
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+
+  # 3. Toggling back to MADS while in Park -> GREEN (2); overriding wheel in Park -> WHITE (1); releasing -> GREEN (2)
+  CS.aol_allowed = True
+  step_ctrl()
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+
+  CS.out.steeringTorque = 280.0
+  step_ctrl(2)
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+
+  CS.out.steeringTorque = 0.0
+  step_ctrl()
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+
+  # 4. Stopped at a red light in Drive with MADS enabled and controlsd pausing CC.latActive=False at standstill:
+  # Wheel stays GREEN (2), and turns WHITE (1) only when overriding!
+  CS.out.gearShifter = structs.CarState.GearShifter.drive
+  CS.out.standstill = True
+  CS.out.vEgo = 0.0
+  CS.out.vEgoRaw = 0.0
+  CS.aol_enabled = True
+  CC.latActive = False
+  step_ctrl()
+  assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+
+  CS.out.steeringTorque = 280.0
+  step_ctrl(2)
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+
+  CS.out.steeringTorque = 0.0
+  step_ctrl()
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+
+  # 5. Driving in MADS (CC.latActive=True) -> GREEN (2) + LKAS_Request=1;
+  # then mode-switching to LKA standby (CS.lka_armed=True, CS.lka_nudge_active=False) while CC.latActive is still True
+  # immediately drops LKAS_Request=0 and sets wheel to WHITE (1) with zero overlap!
+  CS.out.standstill = False
+  CS.out.vEgo = 15.0
+  CS.out.vEgoRaw = 15.0
+  CC.latActive = True
+  step_ctrl()
+  assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 2
+
+  CS.lka_armed = True
+  CS.lka_nudge_active = False
+  CS.aol_allowed = False
+  CS.aol_enabled = False
+  step_ctrl()
+  assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+
+  # 6. Amber departure line (leftLaneDepart=True) stays 3 across 45-deg cornering gate while right white line hides (0)
+  CC.latActive = False
+  CC.hudControl.leftLaneDepart = True
+  CS.out.steeringAngleDeg = 48.0
+  step_ctrl()
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 3
+  assert state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+

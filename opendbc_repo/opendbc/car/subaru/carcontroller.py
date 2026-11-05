@@ -74,6 +74,11 @@ class CarController(CarControllerBase):
     self.lat_active_seen = False
     self.lka_armed = False
     self.lka_nudge_active = False
+    self.aol_allowed = False
+    self.aol_enabled = False
+    self.mads_mode_active = False
+    self.cruise_available_for_status = True
+    self.steer_faulted_for_status = False
     self.in_drive_and_cruise_available = True
     self.standstill_in_drive = False
     self.left_line_vis_debounced = None
@@ -176,6 +181,11 @@ class CarController(CarControllerBase):
 
   def _angle_manual_handoff(self, CS, lat_active, apply_angle=None, CC=None):
     if not lat_active:
+      if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025 and self.mads_mode_active:
+        self._update_angle_driver_override(CS, apply_angle=apply_angle, CC=CC)
+        self.angle_handoff_active = False
+        self.angle_stall_frames = 0
+        return False
       self._reset_angle_handoff()
       return False
 
@@ -279,6 +289,14 @@ class CarController(CarControllerBase):
     is_legacy_2025 = self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025
     self.lka_armed = is_legacy_2025 and bool(getattr(CS, "lka_armed", False))
     self.lka_nudge_active = is_legacy_2025 and bool(getattr(CS, "lka_nudge_active", False))
+    self.aol_allowed = is_legacy_2025 and bool(getattr(CS, "aol_allowed", False))
+    self.aol_enabled = is_legacy_2025 and bool(getattr(CS, "aol_enabled", False))
+    self.mads_mode_active = bool(
+      is_legacy_2025 and
+      not self.lka_armed and
+      not self.lka_nudge_active and
+      (self.aol_allowed or self.aol_enabled or getattr(CC, "latActive", False) or getattr(CC, "enabled", False))
+    )
     is_lka_nudge = self._is_lka_nudge(CC)
 
     if is_legacy_2025:
@@ -292,7 +310,12 @@ class CarController(CarControllerBase):
         structs.CarState.GearShifter.drive,
         structs.CarState.GearShifter.manumatic,
       )
-      lkas_available = CC.latActive and (not mads_only or mads_only_ok) and \
+      lka_standby_mismatch = bool(
+        self.lka_armed and
+        not getattr(CC, "enabled", False) and
+        getattr(CS, "lka_nudge_active", None) is False
+      )
+      lkas_available = CC.latActive and not lka_standby_mismatch and (not mads_only or mads_only_ok) and \
         in_forward_gear and not CS.out.standstill
 
       manual_handoff = self._angle_manual_handoff(CS, lkas_available, apply_angle=apply_angle, CC=CC)
@@ -395,9 +418,22 @@ class CarController(CarControllerBase):
     return subarucan.create_steering_control(self.packer, apply_torque, apply_steer_req)
 
   def _lkas_status_active(self, CC):
-    if self.lka_nudge_active or self.lka_armed or not self.in_drive_and_cruise_available:
+    if self.lka_nudge_active or self.lka_armed:
       return False
-    if self.CP.carFingerprint in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_LEGACY_2025):
+    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+      if not self.cruise_available_for_status or self.steer_faulted_for_status:
+        return False
+      if self.angle_lkas_active:
+        return True
+      return bool(
+        self.mads_mode_active and
+        (not self.in_drive_and_cruise_available or self.standstill_in_drive) and
+        not self.driver_override and
+        not self.angle_handoff_active
+      )
+    if not self.in_drive_and_cruise_available:
+      return False
+    if self.CP.carFingerprint in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_OUTBACK_2023):
       if self.angle_lkas_active:
         return True
       return bool(CC.latActive and self.standstill_in_drive and not self.driver_override and not self.angle_handoff_active)
@@ -432,6 +468,14 @@ class CarController(CarControllerBase):
     is_legacy_2025 = self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025
     self.lka_armed = is_legacy_2025 and bool(getattr(CS, "lka_armed", False))
     self.lka_nudge_active = is_legacy_2025 and bool(getattr(CS, "lka_nudge_active", False))
+    self.aol_allowed = is_legacy_2025 and bool(getattr(CS, "aol_allowed", False))
+    self.aol_enabled = is_legacy_2025 and bool(getattr(CS, "aol_enabled", False))
+    self.mads_mode_active = bool(
+      is_legacy_2025 and
+      not self.lka_armed and
+      not self.lka_nudge_active and
+      (self.aol_allowed or self.aol_enabled or getattr(CC, "latActive", False) or getattr(CC, "enabled", False))
+    )
     cs_out = getattr(CS, "out", None)
     gear_shifter = getattr(cs_out, "gearShifter", None)
     if is_legacy_2025:
@@ -440,7 +484,11 @@ class CarController(CarControllerBase):
       in_drive = gear_shifter == structs.CarState.GearShifter.drive
     cruise_state = getattr(cs_out, "cruiseState", None)
     cruise_available = bool(cruise_state.available) if cruise_state is not None else bool(
-      CC.enabled or CC.latActive or self.lka_armed or self.lka_nudge_active
+      CC.enabled or CC.latActive or self.lka_armed or self.lka_nudge_active or self.aol_allowed or self.aol_enabled
+    )
+    self.cruise_available_for_status = cruise_available
+    self.steer_faulted_for_status = bool(
+      getattr(cs_out, "steerFaultTemporary", False) or getattr(cs_out, "steerFaultPermanent", False)
     )
     self.in_drive_and_cruise_available = bool(in_drive and cruise_available)
     self.standstill_in_drive = bool(
@@ -631,8 +679,8 @@ class CarController(CarControllerBase):
             steer_gate = (steer_angle_deg >= 45.0) if self.lka_armed else False
             left_blinker = bool(getattr(CS.out, "leftBlinker", False))
             right_blinker = bool(getattr(CS.out, "rightBlinker", False))
-            left_depart = (raw_left_depart or self.left_depart_latched) and not steer_gate and not left_blinker
-            right_depart = (raw_right_depart or self.right_depart_latched) and not steer_gate and not right_blinker
+            left_depart = (raw_left_depart or self.left_depart_latched) and not left_blinker
+            right_depart = (raw_right_depart or self.right_depart_latched) and not right_blinker
             self.left_depart_latched = raw_left_depart
             self.right_depart_latched = raw_right_depart
 

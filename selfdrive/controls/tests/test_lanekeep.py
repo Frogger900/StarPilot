@@ -750,3 +750,102 @@ def test_crisp_post_arrest_release_straightening_and_inward_recovery_torque():
     lka3.update(receding_near_line, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=-95.0, dt=0.01, model_updated=False)
   assert not lka3.active
   assert lka3.desired_curvature == 0.0
+
+
+def test_pre_existing_high_driver_torque_prevents_40ms_onset_flash_and_hold():
+  """Regression test for route 0000010f--64946bed87 (Episodes 01, 06, 10, 11, 12):
+  When the driver is already holding high steering torque (> 185 CAN units curve-holding or > 140 opposing)
+  for >= 50 ms BEFORE crossing a boundary threshold, override is already confirmed so LKA never flashes
+  active for 40 ms or latches a 1.05s yellow line on touch.
+  """
+  lka = LaneKeepController()
+  v_ego = 35.0 * CV.MPH_TO_MS
+  centered = _make_model(left_y=-1.80, right_y=1.80)
+  touch_left = _make_model(left_y=-0.99, right_y=2.55)
+
+  # Driver holds +210 CAN units for 0.10s before approaching left line
+  for step in range(10):
+    lka.update(
+      centered,
+      v_ego=v_ego,
+      steering_angle_deg=25.0,
+      steering_torque=210.0,
+      dt=0.01,
+      model_updated=(step % 5 == 0),
+      torque_unit_nm=False,
+    )
+    assert not lka.active
+    assert lka.left_line_state == 1
+
+  # Car touches left line while driver is still holding +210 CAN units: zero 40ms micro-activation!
+  for step in range(20):
+    lka.update(
+      touch_left,
+      v_ego=v_ego,
+      steering_angle_deg=28.0,
+      steering_torque=210.0,
+      dt=0.01,
+      model_updated=(step % 5 == 0),
+      torque_unit_nm=False,
+    )
+    assert not lka.active
+    assert not lka.nudge_active
+    assert lka.desired_curvature == 0.0
+    assert lka.left_line_state == 1
+
+
+def test_ttc_trigger_sustains_until_receding_and_cornering_gate_preserves_latched_yellow_hold():
+  """Regression test for route 0000010f--64946bed87:
+  1) A TTC-triggered nudge at d_right = 0.11m (> d_thresh = 0.07m) remains continuously active while
+     outward drift slows to 0.0 m/s until the car actually begins receding (d_dot >= 0.015 m/s).
+  2) Crossing the 45-deg cornering gate mid-hold stops new nudges and hides white lines (0),
+     while allowing an already-latched 1.05s amber line (3) to finish its countdown cleanly.
+  """
+  v_ego = 52.5 * CV.MPH_TO_MS
+  lka = LaneKeepController()
+
+  # Part 1: Approach right line from d_right = 0.20m down to 0.11m (TTC trigger), then hold at 0.11m
+  for ry in (1.08, 1.05, 1.02, 0.99):
+    m = _make_model(left_y=-2.60, right_y=ry)
+    for sub in range(5):
+      lka.update(m, v_ego=v_ego, steering_angle_deg=2.8, steering_torque=25.0, dt=0.01, model_updated=(sub == 0))
+  assert lka.active and lka.nudge_active
+  assert lka.right_line_state == 3
+
+  # Hold parallel at right_y = 0.99 (d_right = 0.11m, d_dot -> 0.0 m/s): must NOT drop out prematurely!
+  hold_m = _make_model(left_y=-2.60, right_y=0.99)
+  for step in range(25):
+    lka.update(hold_m, v_ego=v_ego, steering_angle_deg=3.2, steering_torque=22.0, dt=0.01, model_updated=(step % 5 == 0))
+    assert lka.nudge_active
+    assert lka.desired_curvature < 0.0
+    assert lka.right_line_state == 3
+
+  # Once car recedes inward (right_y = 1.01 -> 1.04 -> 1.08), nudge_active releases cleanly
+  for ry in (1.01, 1.04, 1.08):
+    rec_m = _make_model(left_y=-2.60, right_y=ry)
+    for sub in range(5):
+      lka.update(rec_m, v_ego=v_ego, steering_angle_deg=3.0, steering_torque=15.0, dt=0.01, model_updated=(sub == 0))
+  assert not lka.nudge_active
+
+  # Part 2: Latched yellow line hold continues for full >= 1.0s even if wheel crosses >= 45 deg mid-hold
+  lka2 = LaneKeepController()
+  touch_left = _make_model(left_y=-1.00, right_y=2.50)
+  for step in range(20):  # 0.20s active nudge at 38 deg
+    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=38.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert lka2.left_line_state == 3
+  assert lka2.right_line_state == 1
+
+  # Wheel turns to 48 deg (>= 45 deg cornering gate): new nudge stops, right white line hides (0),
+  # but already-latched left amber hold (3) finishes its remaining ~1.0s countdown without truncation!
+  for step in range(85):  # 0.85s at 48 deg
+    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=48.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+    assert not lka2.nudge_active
+    assert lka2.left_line_state == 3
+    assert lka2.right_line_state == 0
+
+  # After hold countdown finishes, left line also hides (0) while >= 45 deg
+  for step in range(35):
+    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=48.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert lka2.left_line_state == 0
+  assert lka2.right_line_state == 0
+

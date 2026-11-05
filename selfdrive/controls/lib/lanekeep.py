@@ -350,18 +350,18 @@ class LaneKeepController:
     else:
       self._ttc_right_timer = 0.0
 
-    left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_left <= 0.0) else 0.0
-    right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_right <= 0.0) else 0.0
+    left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_left < 0.03) else 0.0
+    right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_right < 0.03) else 0.0
 
     sustain_left_line = (
       (self._nudge_side == "left") and
-      (d_left < d_thresh_left + ttc_prox_left) and
-      (d_dot_left < -0.015)
+      ((d_left < d_thresh_left + ttc_prox_left and d_dot_left < -0.015) or
+       (d_left < d_thresh_left + 0.055 and d_dot_left < 0.015))
     )
     sustain_right_line = (
       (self._nudge_side == "right") and
-      (d_right < d_thresh_right + ttc_prox_right) and
-      (d_dot_right < -0.015)
+      ((d_right < d_thresh_right + ttc_prox_right and d_dot_right < -0.015) or
+       (d_right < d_thresh_right + 0.055 and d_dot_right < 0.015))
     )
 
     # 8. Candidate Trigger Detection (Left vs. Right painted lane lines before override cooldown gating)
@@ -424,11 +424,10 @@ class LaneKeepController:
       else:
         torque_exceeded = steering_pressed or abs(steering_torque) > OVERRIDE_OPPOSING_CAN_TORQUE
 
+      self._override_confirm_timer = (self._override_confirm_timer + dt) if torque_exceeded else 0.0
       if candidate_side is not None:
-        self._override_confirm_timer = (self._override_confirm_timer + dt) if torque_exceeded else 0.0
         driver_override = self._override_confirm_timer >= OVERRIDE_CONFIRM_TIME_S
       else:
-        self._override_confirm_timer = 0.0
         driver_override = torque_exceeded
 
       # Post-arrest release: once outward painted-line drift has been arrested or slowed,
@@ -515,7 +514,8 @@ class LaneKeepController:
           self.boundary_curvature = (1.0 - alpha_b) * self.boundary_curvature + alpha_b * raw_b_curv
         if not self._lockout:
           d_lim = d_thresh_left + left_hyst
-          d_err = max(0.0, d_lim - d_left)
+          sustain_err = min(0.02, (d_thresh_left + 0.055) - d_left) if sustain_left_line else 0.0
+          d_err = max(0.0, d_lim - d_left, sustain_err)
           vel_left = max(0.0, -d_dot_left)
           recede_scale = max(0.0, 1.0 - (d_dot_left / 0.05)) if d_dot_left > 0.0 else 1.0
           # Positive curvature turns RIGHT away from left lane line
@@ -530,7 +530,8 @@ class LaneKeepController:
           self.boundary_curvature = (1.0 - alpha_b) * self.boundary_curvature + alpha_b * raw_b_curv
         if not self._lockout:
           d_lim = d_thresh_right + right_hyst
-          d_err = max(0.0, d_lim - d_right)
+          sustain_err = min(0.02, (d_thresh_right + 0.055) - d_right) if sustain_right_line else 0.0
+          d_err = max(0.0, d_lim - d_right, sustain_err)
           vel_right = max(0.0, -d_dot_right)
           recede_scale = max(0.0, 1.0 - (d_dot_right / 0.05)) if d_dot_right > 0.0 else 1.0
           # Negative curvature turns LEFT away from right lane line
@@ -617,48 +618,44 @@ class LaneKeepController:
     else:
       active_side = None
 
-    if steer_suppressed or self._blinker_cooldown_left > 0.0:
+    if self._blinker_cooldown_left > 0.0:
       self._left_yellow_hold = 0.0
-    elif active_side == "left":
+    elif not steer_suppressed and active_side == "left":
       self._left_yellow_hold = YELLOW_LINE_HOLD_S
       self._right_yellow_hold = 0.0
     else:
       self._left_yellow_hold = max(0.0, self._left_yellow_hold - dt)
 
-    if steer_suppressed or self._blinker_cooldown_right > 0.0:
+    if self._blinker_cooldown_right > 0.0:
       self._right_yellow_hold = 0.0
-    elif active_side == "right":
+    elif not steer_suppressed and active_side == "right":
       self._right_yellow_hold = YELLOW_LINE_HOLD_S
       self._left_yellow_hold = 0.0
     else:
       self._right_yellow_hold = max(0.0, self._right_yellow_hold - dt)
 
-    left_yellow = (active_side == "left") or (self._left_yellow_hold > 0.0)
-    right_yellow = (active_side == "right") or (self._right_yellow_hold > 0.0)
+    left_yellow = (not steer_suppressed and active_side == "left") or (self._left_yellow_hold > 0.0)
+    right_yellow = (not steer_suppressed and active_side == "right") or (self._right_yellow_hold > 0.0)
 
-    # Suppressed during sharp cornering (>= 45 deg). Amber (3) stays solid for the full
-    # active steering envelope plus a >= 1.0s minimum hold so threshold nudges never flicker.
-    if steer_suppressed:
+    # Suppressed during sharp cornering (>= 45 deg) for white lines and new triggers,
+    # while allowing an already-latched >= 1.0s amber hold to finish cleanly without truncation.
+    if self._blinker_cooldown_left > 0.0:
       self.left_line_state = 0
-      self.right_line_state = 0
+    elif left_yellow:
+      self.left_line_state = 3  # Amber / Yellow
+    elif not steer_suppressed and left_line_visible:
+      self.left_line_state = 1  # Solid White
     else:
-      if self._blinker_cooldown_left > 0.0:
-        self.left_line_state = 0
-      elif left_yellow:
-        self.left_line_state = 3  # Amber / Yellow
-      elif left_line_visible:
-        self.left_line_state = 1  # Solid White
-      else:
-        self.left_line_state = 0
+      self.left_line_state = 0
 
-      if self._blinker_cooldown_right > 0.0:
-        self.right_line_state = 0
-      elif right_yellow:
-        self.right_line_state = 3  # Amber / Yellow
-      elif right_line_visible:
-        self.right_line_state = 1  # Solid White
-      else:
-        self.right_line_state = 0
+    if self._blinker_cooldown_right > 0.0:
+      self.right_line_state = 0
+    elif right_yellow:
+      self.right_line_state = 3  # Amber / Yellow
+    elif not steer_suppressed and right_line_visible:
+      self.right_line_state = 1  # Solid White
+    else:
+      self.right_line_state = 0
 
     # 14. UI Gradient State
     if self.active or left_yellow or right_yellow:

@@ -114,6 +114,8 @@ class Car:
     self.CS_prev = car.CarState.new_message()
     self.initialized_prev = False
     self.lka_armed_last = False
+    self.aol_allowed_last = False
+    self.aol_enabled_last = False
 
     self.last_actuators_output = structs.CarControl.Actuators()
     self.last_steering_limit_info: dict[str, bool | float | int] | None = None
@@ -376,6 +378,8 @@ class Car:
       ev6_aol_authorized=getattr(self.CI.CS, 'ev6_aol_authorized', False),
     )
     self.lka_armed_last = bool(getattr(FPCS, 'lkaArmed', False))
+    self.aol_allowed_last = bool(getattr(FPCS, 'alwaysOnLateralAllowed', False))
+    self.aol_enabled_last = bool(getattr(FPCS, 'alwaysOnLateralEnabled', False))
     return CS, RD, FPCS
 
   def state_publish(self, CS: car.CarState, RD: structs.RadarDataT | None, FPCS: custom.StarPilotCarState):
@@ -485,6 +489,8 @@ class Car:
         self.CI.CC.update_live_params(live_params.roll, live_params.angleOffsetDeg,
                                       live_params.stiffnessFactor, live_params.steerRatio)
       self.CI.CS.lka_armed = self.lka_armed_last
+      self.CI.CS.aol_allowed = self.aol_allowed_last
+      self.CI.CS.aol_enabled = self.aol_enabled_last
       self.CI.CS.lka_nudge_active = bool(
         self.lka_armed_last and
         self.sm.valid['starpilotLateralState'] and
