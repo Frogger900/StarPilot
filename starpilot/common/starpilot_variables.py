@@ -81,7 +81,7 @@ ALWAYS_ON_LATERAL_UNSUPPORTED_CAR_MAKES = frozenset({"volvo"})
 STARPILOT_API = os.getenv("STARPILOT_API", "https://frogpilot.com/api")
 
 
-def _lkas_allowed_for_aol(car_make, cp_flags, fpcp_safety_configs) -> bool:
+def _lkas_allowed_for_aol(car_make, cp_flags, fpcp_safety_configs, car_model=None) -> bool:
   hyundai_has_lda_button = (
     car_make == "hyundai" and
     len(fpcp_safety_configs) > 0 and
@@ -90,7 +90,11 @@ def _lkas_allowed_for_aol(car_make, cp_flags, fpcp_safety_configs) -> bool:
   hyundai_can_use_lkas_for_aol = car_make == "hyundai" and (
     bool(cp_flags & HyundaiFlags.CANFD) or hyundai_has_lda_button
   )
-  subaru_can_use_lkas_for_aol = car_make == "subaru" and not bool(cp_flags & SubaruFlags.PREGLOBAL)
+  subaru_can_use_lkas_for_aol = (
+    car_make == "subaru" and
+    car_model == "SUBARU_LEGACY_2025" and
+    not bool(cp_flags & SubaruFlags.PREGLOBAL)
+  )
   return hyundai_can_use_lkas_for_aol or subaru_can_use_lkas_for_aol or car_make in ("ford", "honda")
 
 
@@ -699,7 +703,7 @@ class StarPilotVariables:
     if not math.isfinite(latAccelFactor):
       latAccelFactor = 0.0
     toggle.lkas_allowed_for_aol = _lkas_allowed_for_aol(
-      toggle.car_make, CP.flags, FPCP.safetyConfigs,
+      toggle.car_make, CP.flags, FPCP.safetyConfigs, toggle.car_model,
     )
     hyundai_can_use_lkas_for_aol = toggle.car_make == "hyundai" and toggle.lkas_allowed_for_aol
     longitudinalActuatorDelay = CP.longitudinalActuatorDelay
@@ -906,6 +910,13 @@ class StarPilotVariables:
     toggle.force_fingerprint = self.get_value("ForceFingerprint", condition=car_model != self.default_values["CarModel"])
     if toggle.force_fingerprint:
       toggle.car_model = car_model
+      toggle.lkas_allowed_for_aol = _lkas_allowed_for_aol(
+        toggle.car_make, CP.flags, FPCP.safetyConfigs, toggle.car_model,
+      )
+      toggle.lkas_button_aol_toggle = bool(toggle.lkas_allowed_for_aol and lkas_button_assigned_to_aol)
+      toggle.always_on_lateral_lkas = (
+        toggle.always_on_lateral and toggle.lkas_allowed_for_aol and lkas_button_assigned_to_aol and not toggle.ford_lkas_aol_toggle
+      )
 
     is_subaru_legacy_2025 = toggle.car_model == "SUBARU_LEGACY_2025"
     toggle.lane_keep_assist = self.get_value("LaneKeepAssist", condition=is_subaru_legacy_2025, default=False)

@@ -1010,25 +1010,32 @@ class Controls:
     hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
 
-    model_v2 = self.sm['modelV2']
-    left_prob = model_v2.laneLineProbs[1] if len(model_v2.laneLineProbs) > 1 else 0.0
-    right_prob = model_v2.laneLineProbs[2] if len(model_v2.laneLineProbs) > 2 else 0.0
-    hudControl.leftLaneVisible = bool(left_prob > 0.4)
-    hudControl.rightLaneVisible = bool(right_prob > 0.4)
+    if self.CP.carFingerprint == "SUBARU_LEGACY_2025":
+      model_v2 = self.sm['modelV2']
+      left_prob = model_v2.laneLineProbs[1] if len(model_v2.laneLineProbs) > 1 else 0.0
+      right_prob = model_v2.laneLineProbs[2] if len(model_v2.laneLineProbs) > 2 else 0.0
+      hudControl.leftLaneVisible = bool(left_prob > 0.4)
+      hudControl.rightLaneVisible = bool(right_prob > 0.4)
 
-    if self.lka_armed_last:
-      hudControl.leftLaneVisible = bool(self.lka.left_line_state > 0)
-      hudControl.rightLaneVisible = bool(self.lka.right_line_state > 0)
-      hudControl.leftLaneDepart = bool(self.lka.left_line_state == 3)
-      hudControl.rightLaneDepart = bool(self.lka.right_line_state == 3)
-      if hudControl.visualAlert == car.CarControl.HUDControl.VisualAlert.none:
-        if self.lka.alert in (LaneKeepAlert.KEEP_HANDS_ON_WHEEL, LaneKeepAlert.EMERGENCY_DEPARTURE):
-          hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.steerRequired
-    elif self.sm.valid['driverAssistance']:
-      hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
-      hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
-      if (hudControl.leftLaneDepart or hudControl.rightLaneDepart) and hudControl.visualAlert == car.CarControl.HUDControl.VisualAlert.none:
-        hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.ldw
+      if self.lka_armed_last:
+        hudControl.leftLaneVisible = bool(self.lka.left_line_state > 0)
+        hudControl.rightLaneVisible = bool(self.lka.right_line_state > 0)
+        hudControl.leftLaneDepart = bool(self.lka.left_line_state == 3)
+        hudControl.rightLaneDepart = bool(self.lka.right_line_state == 3)
+        if hudControl.visualAlert == car.CarControl.HUDControl.VisualAlert.none:
+          if self.lka.alert in (LaneKeepAlert.KEEP_HANDS_ON_WHEEL, LaneKeepAlert.EMERGENCY_DEPARTURE):
+            hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.steerRequired
+      elif self.sm.valid['driverAssistance']:
+        hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
+        hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
+        if (hudControl.leftLaneDepart or hudControl.rightLaneDepart) and hudControl.visualAlert == car.CarControl.HUDControl.VisualAlert.none:
+          hudControl.visualAlert = car.CarControl.HUDControl.VisualAlert.ldw
+    else:
+      hudControl.rightLaneVisible = True
+      hudControl.leftLaneVisible = True
+      if self.sm.valid['driverAssistance']:
+        hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
+        hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
 
     if self.sm['selfdriveState'].active:
       CO = self.sm['carOutput']

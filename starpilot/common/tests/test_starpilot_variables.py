@@ -27,6 +27,13 @@ def test_ford_can_map_lkas_button_to_aol():
   assert spv._lkas_allowed_for_aol("ford", 0, []) is True
 
 
+def test_subaru_lkas_aol_button_path_is_legacy_2025_only():
+  assert spv._lkas_allowed_for_aol("subaru", 0, [], "SUBARU_LEGACY_2025") is True
+  assert spv._lkas_allowed_for_aol("subaru", 0, [], "SUBARU_ASCENT_2023") is False
+  assert spv._lkas_allowed_for_aol("subaru", 0, [], "SUBARU_OUTBACK_2023") is False
+  assert spv._lkas_allowed_for_aol("subaru", spv.SubaruFlags.PREGLOBAL, [], "SUBARU_LEGACY_2025") is False
+
+
 def test_volvo_aol_is_held_off_until_pscm_sequence_is_validated():
   assert spv.always_on_lateral_available(SimpleNamespace(brand="volvo")) is False
   assert spv.always_on_lateral_available(SimpleNamespace(brand="honda")) is True

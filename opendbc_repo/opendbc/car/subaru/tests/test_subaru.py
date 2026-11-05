@@ -703,7 +703,7 @@ def test_ascent_reentry_rate_uses_last_transmitted_angle():
   CS.out.steeringRateDeg = -1.99
   parser.update([(2, [controller.lateral_angle(CC, CS)])])
   assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 1
-  assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"] == pytest.approx(0.55, abs=0.01)
+  assert parser.vl["ES_LKAS_ANGLE"]["LKAS_Output"] == pytest.approx(0.53, abs=0.01)
 
 
 def test_ascent_angle_controller_waits_for_parking_lot_safety_envelope():
@@ -1236,7 +1236,7 @@ def test_stock_cruise_cancel_fresh_frame_gate_is_ascent_angle_only(platform):
     _, sends = controller.update(CC.as_reader(), CS, frame * 10_000_000, toggles)
     cancel_messages.extend(msg for msg in sends if msg[0] == 0x221)
 
-  assert len(cancel_messages) == (1 if (CP.flags & SubaruFlags.GLOBAL_GEN2 or platform == CAR.SUBARU_ASCENT_2023) else 5)
+  assert len(cancel_messages) == (1 if platform in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025) else 5)
   assert all(msg[2] == (CanBus.alt if CP.flags & SubaruFlags.GLOBAL_GEN2 else CanBus.main) for msg in cancel_messages)
   parser = CANParser(DBC[platform][Bus.pt], [("ES_Distance", 0)], cancel_messages[0][2])
   parser.update([(1, [cancel_messages[0]])])
@@ -1289,7 +1289,7 @@ def test_other_angle_cars_keep_lateral_status_behavior():
 
 def test_angle_filter_speed_schedule():
   for speed, tau in ((0.0, 0.3), (5.0, 0.3), (7.5, 0.2), (10.0, 0.1), (15.0, 0.05), (20.0, 0.0), (25.0, 0.0)):
-    CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+    CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
     controller = CarController({}, CP)
     CC = structs.CarControl(enabled=True, latActive=True)
     CC.actuators.steeringAngleDeg = 0.1
@@ -1371,7 +1371,7 @@ def test_lka_nudge_bypasses_angle_filter_while_mads_retains_filter():
 
 
 def test_angle_filter_updates_between_steering_messages():
-  CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
   controller = CarController({}, CP)
   CC = structs.CarControl(latActive=True)
   CC.actuators.steeringAngleDeg = 1.0
@@ -1386,7 +1386,7 @@ def test_angle_filter_updates_between_steering_messages():
 
 
 def test_angle_filter_resets_while_inactive():
-  CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+  CP = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
   controller = CarController({}, CP)
   CC = structs.CarControl(latActive=True)
   CC.actuators.steeringAngleDeg = 1.0
@@ -1683,7 +1683,7 @@ def test_eyesight_background_lkas_alerts_suppressed_while_preserving_fcw_and_ldw
   f = next_seq()
   stock = defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Alert": 28})
   msg = subarucan.create_es_lkas_state(
-    packer, f, stock, True, VisualAlert.steerRequired, 1, 1, False, False, CanBus.main,
+    packer, f, stock, True, VisualAlert.steerRequired, 1, 1, False, False, CanBus.main, ready=True,
   )
   parser.update([(f, [msg])])
   assert parser.vl["ES_LKAS_State"]["LKAS_Alert"] == 0
@@ -2091,4 +2091,87 @@ def test_legacy_2025_mads_green_wheel_park_standstill_override_and_mode_switch()
   step_ctrl()
   assert state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 3
   assert state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+
+def test_non_legacy_subarus_preserve_stock_hud_and_angle_behavior():
+  from opendbc.car.subaru.values import CarControllerParams
+
+  # 1. Angle limits & filter: SUBARU_LEGACY_2025 uses LEGACY_2025_ANGLE_LIMITS + angle_filter; Ascent/Crosstrek/Outback use stock
+  ctrl_legacy = CarController({}, CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025))
+  ctrl_ascent = CarController({}, CarInterface.get_non_essential_params(CAR.SUBARU_ASCENT_2023))
+  ctrl_outback = CarController({}, CarInterface.get_non_essential_params(CAR.SUBARU_OUTBACK_2023))
+
+  assert CarControllerParams.LEGACY_2025_ANGLE_LIMITS.ANGLE_RATE_LIMIT_UP == ([0.0, 5.0, 35.0], [4.5, 0.72, 0.135])
+  assert CarControllerParams.FIXED_ANGLE_LIMITS.ANGLE_RATE_LIMIT_UP == ([0.0, 5.0, 35.0], [5.0, 0.8, 0.15])
+
+  assert getattr(ctrl_legacy, "angle_filter", None) is not None
+  assert getattr(ctrl_ascent, "angle_filter", None) is None
+  assert getattr(ctrl_outback, "angle_filter", None) is None
+
+  # 3. 0x3C4 ES_LKAS_Alert: SUBARU_ASCENT_2023 preserves stock 3-line behavior (only scrubs 000104000000 when enabled)
+  raw_000104 = bytearray.fromhex("0004000104000000")
+  raw_000104[0] = (0xc4 + 3 + sum(raw_000104[1:])) & 0xff
+  _, out_ascent_enabled, _ = subarucan.create_ascent_lkas_alert(bytes(raw_000104), True, VisualAlert.none, legacy_2025=False)
+  assert out_ascent_enabled[2:] == bytes(6)
+
+  raw_1c0704 = bytearray.fromhex("00041c0704000000")
+  raw_1c0704[0] = (0xc4 + 3 + sum(raw_1c0704[1:])) & 0xff
+  _, out_ascent_1c, _ = subarucan.create_ascent_lkas_alert(bytes(raw_1c0704), True, VisualAlert.none, armed=True, legacy_2025=False)
+  assert out_ascent_1c[2:5] == bytes.fromhex("1c0704")
+  _, out_legacy_1c, _ = subarucan.create_ascent_lkas_alert(bytes(raw_1c0704), True, VisualAlert.none, armed=True, legacy_2025=True)
+  assert out_legacy_1c[2:5] == bytes(3)
+
+  # 4. 0x322 ES_LKAS_State: non-Legacy Subarus use stock enabled/left_line/right_line mapping
+  CP_ascent = CarInterface.get_non_essential_params(CAR.SUBARU_ASCENT_2023)
+  ctrl_ascent = CarController({}, CP_ascent)
+  parser_ascent = CANParser(DBC[CAR.SUBARU_ASCENT_2023][Bus.pt], [("ES_LKAS_State", 0)], CanBus.main)
+  CC = SimpleNamespace(
+    enabled=False,
+    latActive=False,
+    longActive=False,
+    cruiseControl=SimpleNamespace(cancel=False),
+    actuators=SimpleNamespace(steeringAngleDeg=0.0, steer=0.0, accel=0.0),
+    hudControl=SimpleNamespace(
+      visualAlert=VisualAlert.none,
+      leftLaneVisible=True,
+      rightLaneVisible=True,
+      leftLaneDepart=False,
+      rightLaneDepart=False,
+      leadVisible=False,
+    ),
+  )
+  CS = SimpleNamespace(
+    out=SimpleNamespace(
+      vEgo=15.0,
+      vEgoRaw=15.0,
+      steeringAngleDeg=0.0,
+      steeringRateDeg=0.0,
+      steeringTorque=0.0,
+      steeringPressed=False,
+      cruiseState=SimpleNamespace(available=True, enabled=False, standstill=False),
+      gearShifter=structs.CarState.GearShifter.drive,
+      standstill=False,
+    ),
+    es_lkas_state_msg=defaultdict(int, {"LKAS_ACTIVE": 1, "LKAS_Dash_State": 2}),
+    es_dashstatus_msg=defaultdict(int),
+    es_distance_msg=defaultdict(int),
+    es_lkas_alert_msg=bytes(raw_000104),
+    es_status_msg=defaultdict(int),
+    es_infotainment_msg=defaultdict(int),
+    es_brake_msg=defaultdict(int),
+    throttle_msg=defaultdict(int),
+    brake_pedal_msg=defaultdict(int),
+    aol_allowed=True,
+    aol_enabled=True,
+    lka_armed=True,
+    lka_nudge_active=False,
+  )
+  ctrl_ascent.frame = 10
+  _, can_sends = ctrl_ascent.update(CC, CS, 1000)
+  state_msgs = [m for m in can_sends if m[0] == 0x322]
+  assert len(state_msgs) == 1
+  parser_ascent.update([(1, state_msgs)])
+  assert parser_ascent.vl["ES_LKAS_State"]["LKAS_ACTIVE"] == 0
+  assert parser_ascent.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 0
+
 

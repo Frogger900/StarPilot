@@ -85,7 +85,7 @@ def create_cruise_buttons(packer, frame, cruise_buttons_msg, button, bus=CanBus.
 
 
 def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert, left_line, right_line, left_lane_depart, right_lane_depart,
-                         bus=CanBus.main, ready=False, lkas_active=True, in_drive=True):
+                         bus=CanBus.main, ready=None, lkas_active=None, in_drive=True):
   values = {s: es_lkas_state_msg[s] for s in [
     "CHECKSUM",
     "LKAS_Alert_Msg",
@@ -106,13 +106,34 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
 
   values["COUNTER"] = frame % 0x10
 
-  # Filter stock EyeSight centering engage/cancel and "Keep hands on wheel" alerts
-  # (25: centering engage beep, 27: centering off beep, 28: hands-on warning beep, 30: hands-on OFF cancel beep)
-  if values["LKAS_Alert"] in (25, 27, 28, 30):
-    values["LKAS_Alert"] = 0
+  legacy_2025_hud = (ready is not None) or (lkas_active is not None) or (left_line == 3) or (right_line == 3)
+  if legacy_2025_hud:
+    # Filter stock EyeSight centering engage/cancel and "Keep hands on wheel" alerts
+    # (25: centering engage beep, 27: centering off beep, 28: hands-on warning beep, 30: hands-on OFF cancel beep)
+    if values["LKAS_Alert"] in (25, 27, 28, 30):
+      values["LKAS_Alert"] = 0
+    if values["LKAS_Alert_Msg"] in (1, 7):
+      values["LKAS_Alert_Msg"] = 0
+  else:
+    # Filter the stock LKAS "Keep hands on wheel" alert
+    if values["LKAS_Alert_Msg"] == 1:
+      values["LKAS_Alert_Msg"] = 0
 
-  if values["LKAS_Alert_Msg"] in (1, 7):
-    values["LKAS_Alert_Msg"] = 0
+    # Filter the stock LKAS sending an audible alert when it turns off LKAS
+    if values["LKAS_Alert"] == 27:
+      values["LKAS_Alert"] = 0
+
+    # Filter the stock LKAS sending an audible alert when "Keep hands on wheel" alert is active (2020+ models)
+    if values["LKAS_Alert"] == 28 and values["LKAS_Alert_Msg"] == 7:
+      values["LKAS_Alert"] = 0
+
+    # Filter the stock LKAS sending an audible alert when "Keep hands on wheel OFF" alert is active (2020+ models)
+    if values["LKAS_Alert"] == 30:
+      values["LKAS_Alert"] = 0
+
+    # Filter the stock LKAS sending "Keep hands on wheel OFF" alert (2020+ models)
+    if values["LKAS_Alert_Msg"] == 7:
+      values["LKAS_Alert_Msg"] = 0
 
   # Preserve stock EyeSight Lane Departure Warnings (11, 12) at all times.
   # Show Keep hands on wheel alert for openpilot steerRequired alert
@@ -126,34 +147,46 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
     elif right_lane_depart:
       values["LKAS_Alert"] = 11  # Right lane departure dash alert
 
-  if lkas_active:
-    values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines / keep screen active
-    values["LKAS_Left_Line_Enable"] = 1
-    values["LKAS_Right_Line_Enable"] = 1
-    if enabled:
-      values["LKAS_Dash_State"] = 2  # 2: Green enabled / active steering
-    elif ready:
-      values["LKAS_Dash_State"] = 1  # 1: White override
+  if legacy_2025_hud:
+    screen_active = True if lkas_active is None else bool(lkas_active)
+    if screen_active:
+      values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines / keep screen active
+      values["LKAS_Left_Line_Enable"] = 1
+      values["LKAS_Right_Line_Enable"] = 1
+      if enabled:
+        values["LKAS_Dash_State"] = 2  # 2: Green enabled / active steering
+      elif ready:
+        values["LKAS_Dash_State"] = 1  # 1: White override
+      else:
+        values["LKAS_Dash_State"] = 0  # 0: Inactive / no steering wheel icon
+      line_visible = 1 if in_drive else 0
     else:
-      values["LKAS_Dash_State"] = 0  # 0: Inactive / no steering wheel icon
-    line_visible = 1 if in_drive else 0
-  else:
-    values["LKAS_ACTIVE"] = 0
-    values["LKAS_Dash_State"] = 0  # LKAS Not enabled / Reverse
-    values["LKAS_Left_Line_Enable"] = 0
-    values["LKAS_Right_Line_Enable"] = 0
-    line_visible = 0
+      values["LKAS_ACTIVE"] = 0
+      values["LKAS_Dash_State"] = 0  # LKAS Not enabled / Reverse
+      values["LKAS_Left_Line_Enable"] = 0
+      values["LKAS_Right_Line_Enable"] = 0
+      line_visible = 0
 
-  # Support line value 3 (Amber / Yellow) for active LKA boundary nudges
-  if left_line == 3:
-    values["LKAS_Left_Line_Visible"] = 3
-  else:
-    values["LKAS_Left_Line_Visible"] = line_visible if left_line else 0
+    # Support line value 3 (Amber / Yellow) for active LKA boundary nudges
+    if left_line == 3:
+      values["LKAS_Left_Line_Visible"] = 3
+    else:
+      values["LKAS_Left_Line_Visible"] = line_visible if left_line else 0
 
-  if right_line == 3:
-    values["LKAS_Right_Line_Visible"] = 3
+    if right_line == 3:
+      values["LKAS_Right_Line_Visible"] = 3
+    else:
+      values["LKAS_Right_Line_Visible"] = line_visible if right_line else 0
   else:
-    values["LKAS_Right_Line_Visible"] = line_visible if right_line else 0
+    if enabled:
+      values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines
+      values["LKAS_Dash_State"] = 2  # Green enabled indicator
+    else:
+      values["LKAS_ACTIVE"] = 0
+      values["LKAS_Dash_State"] = 0  # LKAS Not enabled
+
+    values["LKAS_Left_Line_Visible"] = int(left_line)
+    values["LKAS_Right_Line_Visible"] = int(right_line)
 
   return packer.make_can_msg("ES_LKAS_State", bus, values)
 
@@ -315,6 +348,7 @@ def create_ascent_lkas_alert(
   visual_alert,
   armed: bool = False,
   acc_lead_visible: bool = False,
+  legacy_2025: bool = True,
 ):
   address = 0x3C4
   if len(raw_dat) != 8 or raw_dat[0] != (((address & 0xff) + (address >> 8) + sum(raw_dat[1:])) & 0xff):
@@ -323,7 +357,7 @@ def create_ascent_lkas_alert(
   dat = bytearray(raw_dat)
   changed = False
 
-  if armed:
+  if legacy_2025 and armed:
     # Suppress all background EyeSight centering/toggle/hands-off alerts whenever Cruise Main is armed,
     # while preserving stock FCW (0x01, 0x02, 0x0e), native LDW (0x0b, 0x0c), and opaque status bits in dat[5:].
     if dat[2] in (0x19, 0x1b, 0x1c, 0x1e) or (
@@ -347,7 +381,7 @@ def create_ascent_lkas_alert(
     if dat[2:] == b"\x00\x01\x04\x00\x00\x00":
       dat[3:5] = b"\x00\x00"
       changed = True
-    elif dat[2] == 0x1b or (dat[2] == 0x00 and dat[3] == 0x00 and dat[4] == 0x02):
+    elif legacy_2025 and (dat[2] == 0x1b or (dat[2] == 0x00 and dat[3] == 0x00 and dat[4] == 0x02)):
       # Suppress stock lane-centering toggle chime/LED while preserving native LDW (0x0b, 0x0c, 000005, 000006)
       dat[2:5] = b"\x00\x00\x00"
       changed = True
@@ -356,7 +390,7 @@ def create_ascent_lkas_alert(
   # is active on Bus 2, EyeSight clears dat[5] (the center green ACC lead-car windshield LED) from 0x01 -> 0x00
   # to make room for its LKAS warning LED in dat[4]. Once that background LKAS alert is scrubbed above and no
   # genuine warning alert occupies dat[2:5], restore dat[5] = 0x01 while ACC is actively tracking a lead vehicle.
-  if acc_lead_visible and dat[2:5] == b"\x00\x00\x00" and dat[5] == 0x00:
+  if legacy_2025 and acc_lead_visible and dat[2:5] == b"\x00\x00\x00" and dat[5] == 0x00:
     dat[5] = 0x01
     changed = True
 

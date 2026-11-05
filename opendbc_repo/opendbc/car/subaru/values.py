@@ -21,10 +21,14 @@ class CarControllerParams:
   )
   FIXED_ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
     545,
+    ([0., 5., 35.], [5., .8, .15]),
+    ([0., 5., 35.], [5., .8, .15]),
+  )
+  LEGACY_2025_ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
+    545,
     ([0., 5., 35.], [4.5, .72, .135]),
     ([0., 5., 35.], [4.5, .72, .135]),
   )
-  LEGACY_2025_ANGLE_LIMITS = FIXED_ANGLE_LIMITS
 
   def __init__(self, CP):
     self.STEER_STEP = 2                # how often we update the steer cmd

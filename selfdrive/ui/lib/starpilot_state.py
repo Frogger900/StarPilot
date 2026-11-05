@@ -189,7 +189,7 @@ class StarPilotState:
             self.car_state.lkasAllowedForAOL = (
                 (car_make == "hyundai" and (bool(cp_flags & HyundaiFlags.CANFD) or starpilot_toggles.get("lkas_allowed_for_aol", False))) or
                 car_make == "honda" or
-                (car_make == "subaru" and not bool(cp_flags & SubaruFlags.PREGLOBAL)) or
+                (car_make == "subaru" and car_fingerprint == "SUBARU_LEGACY_2025" and not bool(cp_flags & SubaruFlags.PREGLOBAL)) or
                 (car_make == "toyota" and car_fingerprint in TSS2_CAR)
             )
             self.car_state.longitudinalActuatorDelay = float(self._safe_get(CP, "longitudinalActuatorDelay", self.car_state.longitudinalActuatorDelay))

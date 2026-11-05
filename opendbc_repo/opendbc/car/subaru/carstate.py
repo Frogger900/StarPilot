@@ -118,7 +118,7 @@ class CarState(CarStateBase):
     cp_cruise = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp
     cp_es_brake = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp_cam
     soft_disable = False
-    if not (self.CP.flags & SubaruFlags.PREGLOBAL):
+    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
       soft_disable = cp_cam.vl["ES_DashStatus"].get('Cruise_Soft_Disable', 0) != 0
 
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
@@ -176,24 +176,25 @@ class CarState(CarStateBase):
         self.cruise_buttons = {button: int(bool(cruise_buttons[button])) for button in SUBARU_CRUISE_BUTTONS}
         self.cruise_buttons_msg = copy.copy(cruise_buttons)
 
-      cam_lkas_toggle = int(self.es_lkas_state_msg.get("LKAS_Dash_State", 0)) > 0
-      steer_fault = bool(ret.steerFaultTemporary or ret.steerFaultPermanent)
-      if steer_fault or not ret.cruiseState.available:
-        self.prev_cam_lkas_toggle = None
-      else:
-        if (
-          self.prev_cam_lkas_toggle is not None
-          and self.prev_cruise_available
-          and cam_lkas_toggle != self.prev_cam_lkas_toggle
-        ):
-          button_events = list(ret.buttonEvents) if ret.buttonEvents else []
-          button_events.extend([
-            structs.CarState.ButtonEvent(pressed=True, type=ButtonType.lkas),
-            structs.CarState.ButtonEvent(pressed=False, type=ButtonType.lkas),
-          ])
-          ret.buttonEvents = button_events
-        self.prev_cam_lkas_toggle = cam_lkas_toggle
-      self.prev_cruise_available = bool(ret.cruiseState.available)
+      if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+        cam_lkas_toggle = int(self.es_lkas_state_msg.get("LKAS_Dash_State", 0)) > 0
+        steer_fault = bool(ret.steerFaultTemporary or ret.steerFaultPermanent)
+        if steer_fault or not ret.cruiseState.available:
+          self.prev_cam_lkas_toggle = None
+        else:
+          if (
+            self.prev_cam_lkas_toggle is not None
+            and self.prev_cruise_available
+            and cam_lkas_toggle != self.prev_cam_lkas_toggle
+          ):
+            button_events = list(ret.buttonEvents) if ret.buttonEvents else []
+            button_events.extend([
+              structs.CarState.ButtonEvent(pressed=True, type=ButtonType.lkas),
+              structs.CarState.ButtonEvent(pressed=False, type=ButtonType.lkas),
+            ])
+            ret.buttonEvents = button_events
+          self.prev_cam_lkas_toggle = cam_lkas_toggle
+        self.prev_cruise_available = bool(ret.cruiseState.available)
 
     if not (self.CP.flags & SubaruFlags.HYBRID):
       self.es_distance_msg = copy.copy(cp_es_distance.vl["ES_Distance"])

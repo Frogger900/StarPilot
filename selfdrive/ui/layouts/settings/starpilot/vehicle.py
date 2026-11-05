@@ -161,9 +161,10 @@ class VehicleSettingsManagerView(PanelManagerView):
         on_click=lambda: self._controller._on_select("combo:cancel"),
       ))
 
-    rows.append(SettingRow("LKASButtonControl", "value", tr_noop("LKAS Button"),
-                 get_value=lambda: self._controller._get_action_name("LKASButtonControl"),
-                 on_click=lambda: self._controller._on_select("LKASButtonControl")))
+    if not cs.isSubaru or cs.isSubaruLegacy2025:
+      rows.append(SettingRow("LKASButtonControl", "value", tr_noop("LKAS Button"),
+                   get_value=lambda: self._controller._get_action_name("LKASButtonControl"),
+                   on_click=lambda: self._controller._on_select("LKASButtonControl")))
 
     rows.append(SettingRow("MainCruiseButtonControl", "value", tr_noop("CC Main Button"),
                  get_value=lambda: self._controller._get_action_name("MainCruiseButtonControl"),
