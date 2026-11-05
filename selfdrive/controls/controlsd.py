@@ -696,7 +696,7 @@ class Controls:
         (nudge_right and self.curvature > 1.5e-4 and self.curvature >= parallel_curv - 1.0e-4) or
         (not nudge_right and self.curvature < -1.5e-4 and self.curvature <= parallel_curv + 1.0e-4)
       )
-      drift_arrested_frac = float(np.clip((d_dot_cur + 0.02) / 0.025, 0.0, 1.0)) if curve_aligned else 0.0
+      drift_arrested_frac = min(max((d_dot_cur + 0.02) / 0.025, 0.0), 1.0) if curve_aligned else 0.0
       lka_offset *= (1.0 - 0.65 * drift_arrested_frac)
       target_curv = baseline_curv + lka_offset
       max_nudge_curv = (0.40 - 0.22 * drift_arrested_frac) / v2_eff

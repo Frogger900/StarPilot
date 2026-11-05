@@ -179,6 +179,15 @@ class CarController(CarControllerBase):
   def _is_lka_nudge(self, CC) -> bool:
     return bool(self.lka_nudge_active or (self.lka_armed and not getattr(CC, "enabled", False)))
 
+  def _is_mads_mode_active(self, CC, CS) -> bool:
+    if self.CP.carFingerprint != CAR.SUBARU_LEGACY_2025 or self.lka_armed or self.lka_nudge_active:
+      return False
+    if self.aol_allowed or self.aol_enabled or getattr(CC, "enabled", False):
+      return True
+    if getattr(CS, "aol_allowed", None) is not None or getattr(CS, "aol_enabled", None) is not None:
+      return False
+    return bool(getattr(CC, "latActive", False))
+
   def _angle_manual_handoff(self, CS, lat_active, apply_angle=None, CC=None):
     is_legacy_2025 = self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025
     if not lat_active:
@@ -294,11 +303,7 @@ class CarController(CarControllerBase):
       self.lka_nudge_active = bool(getattr(CS, "lka_nudge_active", False))
       self.aol_allowed = bool(getattr(CS, "aol_allowed", False))
       self.aol_enabled = bool(getattr(CS, "aol_enabled", False))
-      self.mads_mode_active = bool(
-        not self.lka_armed and
-        not self.lka_nudge_active and
-        (self.aol_allowed or self.aol_enabled or getattr(CC, "latActive", False) or getattr(CC, "enabled", False))
-      )
+      self.mads_mode_active = self._is_mads_mode_active(CC, CS)
       is_lka_nudge = self._is_lka_nudge(CC)
 
       mads_only = CC.latActive and not CC.enabled
@@ -316,8 +321,8 @@ class CarController(CarControllerBase):
         not getattr(CC, "enabled", False) and
         getattr(CS, "lka_nudge_active", None) is False
       )
-      lkas_available = CC.latActive and not lka_standby_mismatch and (not mads_only or mads_only_ok) and \
-        in_forward_gear and not CS.out.standstill
+      lkas_available = CC.latActive and (self.mads_mode_active or is_lka_nudge) and not lka_standby_mismatch and \
+        (not mads_only or mads_only_ok) and in_forward_gear and not CS.out.standstill
 
       manual_handoff = self._angle_manual_handoff(CS, lkas_available, apply_angle=apply_angle, CC=CC)
       lkas_active = lkas_available and not manual_handoff
@@ -433,14 +438,13 @@ class CarController(CarControllerBase):
 
   def _lkas_status_active(self, CC):
     if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
-      if self.lka_nudge_active or self.lka_armed:
+      if not self.mads_mode_active or self.lka_nudge_active or self.lka_armed:
         return False
       if not self.cruise_available_for_status or self.steer_faulted_for_status:
         return False
       if self.angle_lkas_active:
         return True
       return bool(
-        self.mads_mode_active and
         (not self.in_drive_and_cruise_available or self.standstill_in_drive) and
         not self.driver_override and
         not self.angle_handoff_active
@@ -492,12 +496,7 @@ class CarController(CarControllerBase):
     self.lka_nudge_active = is_legacy_2025 and bool(getattr(CS, "lka_nudge_active", False))
     self.aol_allowed = is_legacy_2025 and bool(getattr(CS, "aol_allowed", False))
     self.aol_enabled = is_legacy_2025 and bool(getattr(CS, "aol_enabled", False))
-    self.mads_mode_active = bool(
-      is_legacy_2025 and
-      not self.lka_armed and
-      not self.lka_nudge_active and
-      (self.aol_allowed or self.aol_enabled or getattr(CC, "latActive", False) or getattr(CC, "enabled", False))
-    )
+    self.mads_mode_active = self._is_mads_mode_active(CC, CS)
     cs_out = getattr(CS, "out", None)
     gear_shifter = getattr(cs_out, "gearShifter", None)
     if is_legacy_2025:

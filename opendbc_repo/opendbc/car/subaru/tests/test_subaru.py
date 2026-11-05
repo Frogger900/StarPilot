@@ -920,6 +920,25 @@ def test_lkas_hud_standstill_lat_ready_latching():
   parser.update([(35, es_lkas)])
   assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
+
+  # 3b. If LKA disarms on a frame where CC.latActive is still True from a prior LKA nudge while
+  # CS.aol_allowed is False, wheel icon must stay WHITE (1) and never flash GREEN (2)
+  CS.lka_armed = False
+  CS.lka_nudge_active = False
+  CS.aol_allowed = False
+  CS.aol_enabled = False
+  CC.latActive = True
+  CC.enabled = False
+  controller.frame = 40
+  _, can_sends = controller.update(CC, CS, 350_000_000)
+  es_lkas = [msg for msg in can_sends if msg[0] in (0x122, 0x322)]
+  assert len(es_lkas) == 1
+  parser.update([(36, es_lkas)])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
+  del CS.aol_allowed
+  del CS.aol_enabled
+  CC.latActive = False
+  CS.lka_armed = True
   CS.lka_armed = False
 
   # 3b. Fully stopped at red light with MADS engaged:
