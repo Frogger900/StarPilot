@@ -123,20 +123,28 @@ def test_nonfinite_guard_inputs_disarm(value):
   assert update_twitch_guard(TWITCH_GUARD_DURATION, value, False) == 0.0
 
 
-def test_twitch_guard_arms_at_standstill_or_creep_speed():
+def test_twitch_guard_arms_across_low_speed_band():
   assert update_twitch_guard(0.0, 0.0, True) == TWITCH_GUARD_DURATION
   assert update_twitch_guard(0.0, 0.3, False) == TWITCH_GUARD_DURATION
+  assert update_twitch_guard(0.0, 2.2, False) == TWITCH_GUARD_DURATION
 
 
-def test_twitch_guard_decays_after_pullaway_and_expires():
+def test_twitch_guard_decays_above_max_speed_and_expires():
   remaining = update_twitch_guard(0.0, 0.0, True)
-  remaining = update_twitch_guard(remaining, 1.0, False)
+  remaining = update_twitch_guard(remaining, TWITCH_GUARD_MAX_SPEED + 0.5, False)
   assert remaining == pytest.approx(TWITCH_GUARD_DURATION - DT_CTRL)
 
   for _ in range(int(TWITCH_GUARD_DURATION / DT_CTRL) + 1):
-    remaining = update_twitch_guard(remaining, 1.0, False)
+    remaining = update_twitch_guard(remaining, TWITCH_GUARD_MAX_SPEED + 0.5, False)
   assert remaining == 0.0
 
 
-def test_twitch_guard_does_not_arm_while_moving():
-  assert update_twitch_guard(0.0, 1.0, False) == 0.0
+def test_twitch_guard_does_not_arm_above_low_speed_band():
+  assert update_twitch_guard(0.0, TWITCH_GUARD_MAX_SPEED, False) == 0.0
+  assert update_twitch_guard(0.0, 6.0, False) == 0.0
+
+
+def test_guard_clamps_short_stop_plan_behind_lead():
+  short_straight_plan = _plan([i * 0.5 for i in range(11)], [0.0] * 11)  # 5.0 m reach
+  guarded = limit_curvature_to_plan(short_straight_plan, 0.0228, 0.5)
+  assert guarded == pytest.approx(TWITCH_GUARD_FLOOR)

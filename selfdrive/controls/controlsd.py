@@ -187,7 +187,7 @@ TWITCH_GUARD_PLAN_RATIO = 4.0
 TWITCH_GUARD_FLOOR = 0.002
 TWITCH_GUARD_STRAIGHT_LO = 0.005
 TWITCH_GUARD_STRAIGHT_HI = 0.014
-TWITCH_GUARD_MIN_REACH = 12.0
+TWITCH_GUARD_MIN_REACH = 4.0
 
 
 def _plan_circle_curvature(xs, ys, lookahead: float) -> float:
@@ -271,7 +271,7 @@ def limit_curvature_to_plan(model_v2, curvature: float, v_ego: float) -> float:
   if not math.isfinite(reach) or reach < TWITCH_GUARD_MIN_REACH:
     return curvature
   plan = abs(_plan_circle_curvature(model_v2.position.x, model_v2.position.y,
-                                    CURVATURE_HOLD_PLAN_LOOKAHEAD_FAR))
+                                    min(CURVATURE_HOLD_PLAN_LOOKAHEAD_FAR, reach)))
   if not math.isfinite(plan):
     return curvature
   straightness = (plan - TWITCH_GUARD_STRAIGHT_LO) / (TWITCH_GUARD_STRAIGHT_HI - TWITCH_GUARD_STRAIGHT_LO)
@@ -286,7 +286,7 @@ def limit_curvature_to_plan(model_v2, curvature: float, v_ego: float) -> float:
 def update_twitch_guard(remaining: float, v_ego: float, standstill: bool) -> float:
   if not (math.isfinite(remaining) and math.isfinite(v_ego)):
     return 0.0
-  if standstill or abs(v_ego) <= 0.3:
+  if standstill or abs(v_ego) < TWITCH_GUARD_MAX_SPEED:
     return TWITCH_GUARD_DURATION
   return max(remaining - DT_CTRL, 0.0)
 

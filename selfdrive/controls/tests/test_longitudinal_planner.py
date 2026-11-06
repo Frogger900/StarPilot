@@ -3520,6 +3520,39 @@ def test_modeld_action_uses_current_action_head_scaling_for_v16(monkeypatch):
   assert action.desiredAcceleration < -0.2
   assert not action.shouldStop
 
+  low_speed_v16 = modeld.get_action_from_model(
+    {"action": np.array([[0.25, 0.5]], dtype=np.float32)},
+    prev_action,
+    lat_action_t=0.2,
+    long_action_t=0.73,
+    v_ego=1.0,
+    mlsim=True,
+    is_v9=False,
+    is_v14=False,
+    is_v15=False,
+    starpilot_toggles=toggles,
+    is_v16=True,
+  )
+  low_speed_v15 = modeld.get_action_from_model(
+    {"action": np.array([[0.25, 0.5]], dtype=np.float32)},
+    prev_action,
+    lat_action_t=0.2,
+    long_action_t=0.73,
+    v_ego=1.0,
+    mlsim=True,
+    is_v9=False,
+    is_v14=False,
+    is_v15=True,
+    starpilot_toggles=toggles,
+    is_v16=False,
+  )
+  assert low_speed_v16.desiredCurvature == pytest.approx(
+    modeld.smooth_value(0.25 / (2.5 ** 2), prev_action.desiredCurvature, modeld.LAT_SMOOTH_SECONDS)
+  )
+  assert low_speed_v15.desiredCurvature == pytest.approx(
+    modeld.smooth_value(0.25 / (1.0 ** 2), prev_action.desiredCurvature, modeld.LAT_SMOOTH_SECONDS)
+  )
+
 
 def test_publish_force_stop_handoff_sets_should_stop_when_vcruise_zero():
   class FakePM:

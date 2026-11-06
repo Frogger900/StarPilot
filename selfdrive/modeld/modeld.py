@@ -407,7 +407,9 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
                           is_v16: bool = False) -> log.ModelDataV2.Action:
     if is_v14 or is_v15 or is_v16:
       desired_curv_unscaled, desired_accel = model_output['action'][0]
-      if is_v15 or is_v16:
+      if is_v16:
+        desired_curvature = float(desired_curv_unscaled) / max(2.5, v_ego) ** 2
+      elif is_v15:
         desired_curvature = float(desired_curv_unscaled) / max(1.0, v_ego) ** 2
       else:
         desired_curvature = float(desired_curv_unscaled) / 100.0
