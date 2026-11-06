@@ -259,11 +259,11 @@ def test_cornering_and_blinker_gates():
   lka = LaneKeepController()
   model = _make_model(left_y=-1.00, right_y=2.5)  # Triggers left nudge normally
 
-  # 1. Cornering gate: wheel turned >= 45 deg suppresses lines and assist
+  # 1. Cornering gate: wheel turned >= 35 deg suppresses lines and assist
   lka.update(
     model,
     v_ego=30.0 * CV.MPH_TO_MS,
-    steering_angle_deg=46.0,
+    steering_angle_deg=36.0,
     steering_torque=0.0,
     left_blinker=False,
     right_blinker=False,
@@ -272,7 +272,7 @@ def test_cornering_and_blinker_gates():
   assert lka.left_line_state == 0
   assert lka.right_line_state == 0
 
-  lka.reset()
+  lka.reset(full=True)
 
   # 2. Left Blinker Gate: Left line turns off, nudge suppressed
   lka.update(
@@ -827,25 +827,91 @@ def test_ttc_trigger_sustains_until_receding_and_cornering_gate_preserves_latche
       lka.update(rec_m, v_ego=v_ego, steering_angle_deg=3.0, steering_torque=15.0, dt=0.01, model_updated=(sub == 0))
   assert not lka.nudge_active
 
-  # Part 2: Latched yellow line hold continues for full >= 1.0s even if wheel crosses >= 45 deg mid-hold
+  # Part 2: Latched yellow line hold continues for full >= 1.0s even if wheel crosses >= 35 deg mid-hold
   lka2 = LaneKeepController()
   touch_left = _make_model(left_y=-1.00, right_y=2.50)
-  for step in range(20):  # 0.20s active nudge at 38 deg
-    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=38.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  for step in range(20):  # 0.20s active nudge at 28 deg (< 35 deg gate)
+    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=28.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
   assert lka2.left_line_state == 3
   assert lka2.right_line_state == 1
 
-  # Wheel turns to 48 deg (>= 45 deg cornering gate): new nudge stops, right white line hides (0),
+  # Wheel turns to 38 deg (>= 35 deg cornering gate): new nudge stops, right white line hides (0),
   # but already-latched left amber hold (3) finishes its remaining ~1.0s countdown without truncation!
-  for step in range(85):  # 0.85s at 48 deg
-    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=48.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  for step in range(85):  # 0.85s at 38 deg
+    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=38.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
     assert not lka2.nudge_active
     assert lka2.left_line_state == 3
     assert lka2.right_line_state == 0
 
-  # After hold countdown finishes, left line also hides (0) while >= 45 deg
+  # After hold countdown finishes, left line also hides (0) while >= 35 deg
   for step in range(35):
-    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=48.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+    lka2.update(touch_left, v_ego=32.0 * CV.MPH_TO_MS, steering_angle_deg=38.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
   assert lka2.left_line_state == 0
   assert lka2.right_line_state == 0
+
+
+def test_single_line_reduced_sensitivity_road_edge_pinch_and_cornering_unwind_cooldown():
+  """Regression test for route 00000111--05b42a314b:
+  1) When only one painted line is visible, hugging the yellow line at d_left = +0.05m does not nuisance-trigger,
+     while crossing onto/over the line (d_left = -0.04m) triggers cleanly.
+  2) When the opposite painted line is missing and the physical roadEdge pinches tightly, the road-edge
+     narrow-lane pinch guard backs off d_thresh down to -0.06m so LKA never pushes into a tight shoulder.
+  3) Unwinding from >= 35 deg holds a 0.50s post-cornering cooldown before re-enabling LKA triggers.
+  """
+  v_ego = 38.0 * CV.MPH_TO_MS
+  lka = LaneKeepController()
+
+  # 1. Single visible left line with left tire at d_left = +0.05m (left_y = -1.01) -> no trigger
+  hug_single_left = _make_model(
+    left_y=-1.01, right_y=1.80, left_prob=0.90, right_prob=0.10,
+    edge_left_y=-2.50, edge_right_y=1.85, edge_right_std=0.15,
+  )
+  for step in range(40):
+    lka.update(hug_single_left, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+    assert not lka.active
+    assert lka.left_line_state == 1
+    assert lka.right_line_state == 0
+
+  # Crossing onto the single left line (left_y = -0.92 -> d_left = -0.04m < -0.02m) with ample right road edge -> triggers!
+  cross_single_left = _make_model(
+    left_y=-0.92, right_y=1.80, left_prob=0.90, right_prob=0.10,
+    edge_left_y=-2.50, edge_right_y=1.85, edge_right_std=0.15,
+  )
+  for step in range(20):
+    lka.update(cross_single_left, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert lka.active
+  assert lka.desired_curvature > 0.0
+  assert lka.left_line_state == 3
+
+  # 2. Tight right road-edge pinch (edge_right_y = 1.15 -> d_right_edge = 1.15 - 0.88 - 0.25 = +0.02m)
+  # pushes half_clearance down so d_left = -0.04m does NOT nudge toward the right ditch/edge!
+  lka.reset(full=True)
+  tight_edge_pinch = _make_model(
+    left_y=-0.92, right_y=1.80, left_prob=0.90, right_prob=0.10,
+    edge_left_y=-2.50, edge_right_y=1.15, edge_right_std=0.15,
+  )
+  for step in range(30):
+    lka.update(tight_edge_pinch, v_ego=v_ego, steering_angle_deg=0.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+    assert not lka.active
+    assert lka.desired_curvature == 0.0
+
+  # 3. 35-deg cornering gate + 0.50s unwind cooldown
+  lka.reset(full=True)
+  two_line_cross = _make_model(left_y=-0.98, right_y=2.50)
+  for step in range(10):
+    lka.update(two_line_cross, v_ego=v_ego, steering_angle_deg=38.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+    assert not lka.active
+    assert lka.left_line_state == 0
+
+  # Unwind wheel to 25 deg: suppressed for the first 0.45s of the 0.50s unwind cooldown
+  for step in range(45):
+    lka.update(two_line_cross, v_ego=v_ego, steering_angle_deg=25.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+    assert not lka.active
+
+  # After 0.50s unwind cooldown expires, LKA resumes normally
+  for step in range(15):
+    lka.update(two_line_cross, v_ego=v_ego, steering_angle_deg=25.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
+  assert lka.active
+  assert lka.left_line_state == 3
+
 

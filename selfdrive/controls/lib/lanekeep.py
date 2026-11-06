@@ -17,10 +17,15 @@ class LaneKeepAlert(IntEnum):
 DEFAULT_VEHICLE_HALF_WIDTH = 0.92  # meters (centerline to outer edge of tire)
 DEFAULT_CAMERA_OFFSET = 0.04       # meters
 
-# Standard Painted-Line Trigger Thresholds (~3 in margin from painted line)
+# Standard Painted-Line Trigger Thresholds (~3 in margin from painted line when both lines visible)
 STANDARD_LINE_MARGIN_M = 0.07
 STANDARD_TTC_PROX_M = 0.10
 STANDARD_TTC_THRESH_S = 0.75
+# Single-Line Trigger Thresholds (reduced sensitivity when only one painted line is visible)
+SINGLE_LINE_MARGIN_M = -0.02
+SINGLE_LINE_TTC_PROX_M = 0.04
+ROAD_EDGE_MAX_STD = 0.45
+UNMARKED_EDGE_BUFFER_M = 0.25
 DEFAULT_GRADIENT_WIDTH = 0.30
 
 # Dynamics and Acceleration Limits
@@ -35,7 +40,8 @@ POST_ARREST_STRAIGHTEN_CAN_TORQUE = 60.0   # Gentle opposing CAN torque releasin
 POST_ARREST_INWARD_CAN_TORQUE = 80.0       # Inward recovery CAN torque releasing hold once drift slows
 POST_ARREST_CONFIRM_TIME_S = 0.04          # 40 ms debounce for post-arrest release
 POST_ARREST_COOLDOWN_S = 0.50              # Brief cooldown after driver takes over from an arrested drift
-CORNERING_GATE_ANGLE_DEG = 45.0            # degrees (suppress assist during active turns)
+CORNERING_GATE_ANGLE_DEG = 35.0            # degrees (suppress assist at and above 35 deg of wheel turn)
+POST_CORNERING_COOLDOWN_S = 0.50           # seconds to wait after unwinding below cornering angle gate
 APEX_CUT_BUFFER_M = 0.12                   # meters (reduce trigger margin on inside curve apex)
 POST_BLINKER_COOLDOWN_S = 2.0              # seconds to wait after turn signal auto-cancels
 
@@ -133,6 +139,7 @@ class LaneKeepController:
     self._lockout = False
     self._blinker_cooldown_left = 0.0
     self._blinker_cooldown_right = 0.0
+    self._cornering_cooldown = 0.0
     self._speed_armed = False
 
   def _clear_hands_off_tracking(self):
@@ -206,6 +213,7 @@ class LaneKeepController:
       self._speed_armed = False
       self._blinker_cooldown_left = 0.0
       self._blinker_cooldown_right = 0.0
+      self._cornering_cooldown = 0.0
 
   def update(
     self,
@@ -265,32 +273,56 @@ class LaneKeepController:
     elif self._blinker_cooldown_right > 0.0:
       self._blinker_cooldown_right = max(0.0, self._blinker_cooldown_right - dt)
 
-    # 5. Cornering Suppression Gate (Physical wheel turned >= 45 deg)
-    steer_suppressed = abs(steering_angle_deg) >= CORNERING_GATE_ANGLE_DEG
+    # 5. Cornering Suppression Gate (Physical wheel turned >= 35 deg + 0.5s unwind cooldown)
+    if abs(steering_angle_deg) >= CORNERING_GATE_ANGLE_DEG:
+      self._cornering_cooldown = POST_CORNERING_COOLDOWN_S
+    elif self._cornering_cooldown > 0.0:
+      self._cornering_cooldown = max(0.0, self._cornering_cooldown - dt)
+    steer_suppressed = (abs(steering_angle_deg) >= CORNERING_GATE_ANGLE_DEG) or (self._cornering_cooldown > 0.0)
 
-    # 6. Standard Painted-Line Thresholds (~3 in from painted line, tight ~4 in drift lookahead)
-    d_thresh = STANDARD_LINE_MARGIN_M
-    ttc_line_prox = STANDARD_TTC_PROX_M
-    ttc_thresh = STANDARD_TTC_THRESH_S
-    self.gradient_width = DEFAULT_GRADIENT_WIDTH
-
-    # 7. Extract Painted Lane-Line Vision Data
+    # 6. Extract Painted Lane-Line & Road-Edge Vision Data
     left_prob = float(model_v2.laneLineProbs[1]) if len(model_v2.laneLineProbs) > 1 else 0.0
     right_prob = float(model_v2.laneLineProbs[2]) if len(model_v2.laneLineProbs) > 2 else 0.0
     left_line_visible = left_prob >= 0.40
     right_line_visible = right_prob >= 0.40
 
+    # 7. Painted-Line Thresholds (standard when both lines visible; reduced sensitivity on single-line roads)
+    both_lines_visible = left_line_visible and right_line_visible
+    d_thresh = STANDARD_LINE_MARGIN_M if both_lines_visible else SINGLE_LINE_MARGIN_M
+    ttc_line_prox = STANDARD_TTC_PROX_M if both_lines_visible else SINGLE_LINE_TTC_PROX_M
+    ttc_thresh = STANDARD_TTC_THRESH_S
+    self.gradient_width = DEFAULT_GRADIENT_WIDTH
+
     left_y = float(model_v2.laneLines[1].y[0]) if len(model_v2.laneLines) > 1 and len(model_v2.laneLines[1].y) > 0 else -1.8
     right_y = float(model_v2.laneLines[2].y[0]) if len(model_v2.laneLines) > 2 and len(model_v2.laneLines[2].y) > 0 else 1.8
+
+    road_edges = getattr(model_v2, "roadEdges", ())
+    road_edge_stds = getattr(model_v2, "roadEdgeStds", ())
+    left_edge_visible = (
+      len(road_edge_stds) > 0 and
+      len(road_edges) > 0 and
+      len(road_edges[0].y) > 0 and
+      float(road_edge_stds[0]) <= ROAD_EDGE_MAX_STD
+    )
+    right_edge_visible = (
+      len(road_edge_stds) > 1 and
+      len(road_edges) > 1 and
+      len(road_edges[1].y) > 0 and
+      float(road_edge_stds[1]) <= ROAD_EDGE_MAX_STD
+    )
+    left_edge_y = float(road_edges[0].y[0]) if left_edge_visible else -1.8
+    right_edge_y = float(road_edges[1].y[0]) if right_edge_visible else 1.8
 
     if model_updated or not self._curv_initialized:
       self._curv_initialized = True
       self._left_line_curv = _estimate_boundary_curvature(model_v2.laneLines[1]) if (left_line_visible and len(model_v2.laneLines) > 1) else 0.0
       self._right_line_curv = _estimate_boundary_curvature(model_v2.laneLines[2]) if (right_line_visible and len(model_v2.laneLines) > 2) else 0.0
 
-    # Distance from tire outer edges to painted lane lines
+    # Distance from tire outer edges to painted lane lines (and buffered physical road edges)
     d_left = -left_y - (self.w_half + self.camera_offset)
     d_right = right_y - (self.w_half - self.camera_offset)
+    d_left_edge = -left_edge_y - (self.w_half + self.camera_offset) - UNMARKED_EDGE_BUFFER_M
+    d_right_edge = right_edge_y - (self.w_half - self.camera_offset) - UNMARKED_EDGE_BUFFER_M
 
     # Lateral velocities updated strictly on 20 Hz modelV2 frames with EMA filtering
     # (prevents 5x derivative spikes from differentiating 20 Hz vision at 100 Hz DT_CTRL)
@@ -338,30 +370,42 @@ class LaneKeepController:
       d_thresh_right = min(d_thresh_right, max(-0.04, half_clearance - 0.12))
       ttc_prox_left = min(ttc_line_prox, max(0.0, (half_clearance - 0.06) - d_thresh_left))
       ttc_prox_right = min(ttc_line_prox, max(0.0, (half_clearance - 0.06) - d_thresh_right))
+    elif left_line_visible and right_edge_visible:
+      # Single-line narrow-road pinch guard using right road edge when right painted line is absent
+      half_clearance = 0.5 * (d_left + d_right_edge)
+      d_thresh_left = min(d_thresh_left, max(-0.06, half_clearance - 0.12))
+      ttc_prox_left = min(ttc_line_prox, max(0.0, (half_clearance - 0.06) - d_thresh_left))
+    elif right_line_visible and left_edge_visible:
+      # Single-line narrow-road pinch guard using left road edge when left painted line is absent
+      half_clearance = 0.5 * (d_left_edge + d_right)
+      d_thresh_right = min(d_thresh_right, max(-0.06, half_clearance - 0.12))
+      ttc_prox_right = min(ttc_line_prox, max(0.0, (half_clearance - 0.06) - d_thresh_right))
 
     # Proximity-gated & debounced TTC triggers
-    if left_line_visible and d_left < (d_thresh_left + ttc_prox_left) and ttc_left < ttc_thresh:
+    if left_line_visible and not steer_suppressed and d_left < (d_thresh_left + ttc_prox_left) and ttc_left < ttc_thresh:
       self._ttc_left_timer += dt
     else:
       self._ttc_left_timer = 0.0
 
-    if right_line_visible and d_right < (d_thresh_right + ttc_prox_right) and ttc_right < ttc_thresh:
+    if right_line_visible and not steer_suppressed and d_right < (d_thresh_right + ttc_prox_right) and ttc_right < ttc_thresh:
       self._ttc_right_timer += dt
     else:
       self._ttc_right_timer = 0.0
 
     left_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "left" and d_dot_left < 0.03) else 0.0
     right_hyst = NUDGE_RELEASE_HYSTERESIS_M if (self._nudge_side == "right" and d_dot_right < 0.03) else 0.0
+    sustain_margin_left = min(0.055, ttc_prox_left)
+    sustain_margin_right = min(0.055, ttc_prox_right)
 
     sustain_left_line = (
       (self._nudge_side == "left") and
       ((d_left < d_thresh_left + ttc_prox_left and d_dot_left < -0.015) or
-       (d_left < d_thresh_left + 0.055 and d_dot_left < 0.015))
+       (d_left < d_thresh_left + sustain_margin_left and d_dot_left < 0.015))
     )
     sustain_right_line = (
       (self._nudge_side == "right") and
       ((d_right < d_thresh_right + ttc_prox_right and d_dot_right < -0.015) or
-       (d_right < d_thresh_right + 0.055 and d_dot_right < 0.015))
+       (d_right < d_thresh_right + sustain_margin_right and d_dot_right < 0.015))
     )
 
     # 8. Candidate Trigger Detection (Left vs. Right painted lane lines before override cooldown gating)
@@ -514,7 +558,7 @@ class LaneKeepController:
           self.boundary_curvature = (1.0 - alpha_b) * self.boundary_curvature + alpha_b * raw_b_curv
         if not self._lockout:
           d_lim = d_thresh_left + left_hyst
-          sustain_err = min(0.02, (d_thresh_left + 0.055) - d_left) if sustain_left_line else 0.0
+          sustain_err = min(0.02, (d_thresh_left + sustain_margin_left) - d_left) if sustain_left_line else 0.0
           d_err = max(0.0, d_lim - d_left, sustain_err)
           vel_left = max(0.0, -d_dot_left)
           recede_scale = max(0.0, 1.0 - (d_dot_left / 0.05)) if d_dot_left > 0.0 else 1.0
@@ -530,7 +574,7 @@ class LaneKeepController:
           self.boundary_curvature = (1.0 - alpha_b) * self.boundary_curvature + alpha_b * raw_b_curv
         if not self._lockout:
           d_lim = d_thresh_right + right_hyst
-          sustain_err = min(0.02, (d_thresh_right + 0.055) - d_right) if sustain_right_line else 0.0
+          sustain_err = min(0.02, (d_thresh_right + sustain_margin_right) - d_right) if sustain_right_line else 0.0
           d_err = max(0.0, d_lim - d_right, sustain_err)
           vel_right = max(0.0, -d_dot_right)
           recede_scale = max(0.0, 1.0 - (d_dot_right / 0.05)) if d_dot_right > 0.0 else 1.0
@@ -637,7 +681,7 @@ class LaneKeepController:
     left_yellow = (not steer_suppressed and active_side == "left") or (self._left_yellow_hold > 0.0)
     right_yellow = (not steer_suppressed and active_side == "right") or (self._right_yellow_hold > 0.0)
 
-    # Suppressed during sharp cornering (>= 45 deg) for white lines and new triggers,
+    # Suppressed during sharp cornering (>= 35 deg + 0.5s unwind cooldown) for white lines and new triggers,
     # while allowing an already-latched >= 1.0s amber hold to finish cleanly without truncation.
     if self._blinker_cooldown_left > 0.0:
       self.left_line_state = 0

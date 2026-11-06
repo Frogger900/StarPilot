@@ -657,13 +657,13 @@ class Controls:
       if nudge_right:
         if self.curvature > self.lka_entry_curvature and b_curv > self.lka_entry_curvature:
           self.lka_entry_curvature = max(self.lka_entry_curvature, min(self.curvature, b_curv))
-        parallel_curv = min(b_curv, self.lka_entry_curvature + max_align_curv)
-        base_start = min(self.lka_entry_curvature, parallel_curv)
+        parallel_curv = max(self.lka_entry_curvature, min(b_curv, self.lka_entry_curvature + max_align_curv))
+        base_start = self.lka_entry_curvature
       else:
         if self.curvature < self.lka_entry_curvature and b_curv < self.lka_entry_curvature:
           self.lka_entry_curvature = min(self.lka_entry_curvature, max(self.curvature, b_curv))
-        parallel_curv = max(b_curv, self.lka_entry_curvature - max_align_curv)
-        base_start = max(self.lka_entry_curvature, parallel_curv)
+        parallel_curv = min(self.lka_entry_curvature, max(b_curv, self.lka_entry_curvature - max_align_curv))
+        base_start = self.lka_entry_curvature
 
       d_dot_cur = float(getattr(self.lka, "_d_dot_left" if nudge_right else "_d_dot_right", 0.0))
       already_turning_inward = (self.curvature > b_curv + 2e-4) if nudge_right else (self.curvature < b_curv - 2e-4)
