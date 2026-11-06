@@ -2,6 +2,9 @@
 import json
 import random
 import re
+import shutil
+import subprocess
+import sys
 import urllib.request
 
 from pathlib import Path
@@ -29,6 +32,8 @@ from openpilot.common.file_chunker import file_chunked_exists, get_existing_chun
 from openpilot.system.hardware.usb import chestnut_firmware_ready
 
 MANIFEST_CANDIDATES = ("v25",)
+SUPPLEMENTAL_MANIFEST_CANDIDATES = ("v26",)
+MODEL_COMPILER_SCRIPT = Path(__file__).resolve().parents[2] / "scripts/model_compiler.py"
 MODEL_NAMESPACE_SUFFIX = "3"
 DEFAULT_MODEL_KEY = "rdf43"
 ACTIVE_BIG_MODEL_PARAM = "ActiveBigModel"
@@ -552,16 +557,25 @@ class ModelManager:
       if not model_key or not is_supported_artifact_format(artifact_format):
         continue
       uses_external_gpu = bool(model.get("uses_external_gpu", False))
+      onnx_compile_only = bool(model.get("onnx_compile_only", False))
+      raw_source_sha = model.get("source_sha256")
+      source_sha256 = (
+        {str(k).strip(): str(v).strip().lower() for k, v in raw_source_sha.items() if k and v}
+        if isinstance(raw_source_sha, dict) else {}
+      )
       model_size_declared = bool(model.get("model_size") or model.get("size_class"))
       model_size = str(model.get("model_size") or model.get("size_class") or ("chestnut" if uses_external_gpu else "small")).strip()
       metadata[model_key] = {
         "artifact_format": artifact_format,
         "artifact_filename": str(model.get("artifact_filename") or "").strip(),
-        "artifact_size": int(model.get("artifact_size") or 0),
-        "artifact_sha256": str(model.get("artifact_sha256") or "").strip().lower(),
-        "artifact_chunk_count": int(model.get("artifact_chunk_count") or 0),
+        "artifact_size": 0 if onnx_compile_only else int(model.get("artifact_size") or 0),
+        "artifact_sha256": "" if onnx_compile_only else str(model.get("artifact_sha256") or "").strip().lower(),
+        "artifact_chunk_count": 0 if onnx_compile_only else int(model.get("artifact_chunk_count") or 0),
         "artifact_url": str(model.get("artifact_url") or model.get("download_url") or "").strip(),
         "uses_external_gpu": uses_external_gpu,
+        "onnx_compile_only": onnx_compile_only,
+        "version": str(model.get("version") or "").strip(),
+        "source_sha256": source_sha256,
         "model_size": model_size,
         "model_size_declared": model_size_declared,
         "model_lab_eligible": bool(model.get("model_lab_eligible", not uses_external_gpu)),
@@ -717,6 +731,61 @@ class ModelManager:
       return (f"{resource_url}/models/{manifest_version}/{model_key}/{filename}",)
     return (f"{resource_url}/Models/{manifest_version}/{model_key}/{filename}",)
 
+  @classmethod
+  def _onnx_source_urls(cls, resource_url: str, model_key: str, filename: str) -> tuple[str, ...]:
+    model_key = quote(cls._canonical_model_key(model_key), safe="")
+    filename = quote(filename, safe="")
+    return (f"{resource_url.rstrip('/')}/onnx/{model_key}/{filename}",)
+
+  def _supplement_manifest_from_newer_generations(self, resource_urls: list[str], primary_models: list[dict]) -> list[dict]:
+    """Append catalog entries from newer manifest generations (e.g. v26) that are absent from v25.
+
+    These entries are listed in the UI using 0 bytes of disk space and are only downloaded
+    from their ONNX source and compiled on-device when the user explicitly requests a download.
+    """
+    seen_keys = {
+      self._canonical_model_key(str(model.get("id") or "").strip())
+      for model in primary_models
+      if model.get("id")
+    }
+    supplemented = list(primary_models)
+
+    for supplemental_version in SUPPLEMENTAL_MANIFEST_CANDIDATES:
+      if supplemental_version in MANIFEST_CANDIDATES:
+        continue
+      for resource_url in resource_urls:
+        manifest_paths = (
+          self._hf_manifest_paths(supplemental_version)
+          if self._is_huggingface_url(resource_url)
+          else self._manifest_paths(supplemental_version)
+        )
+        fetched_any = False
+        for manifest_path in manifest_paths:
+          extra_models = self._fetch_manifest(f"{resource_url}/{manifest_path}")
+          if not extra_models:
+            continue
+          fetched_any = True
+          for model in extra_models:
+            if not isinstance(model, dict):
+              continue
+            model_key = self._canonical_model_key(str(model.get("id") or "").strip())
+            if not model_key or model_key in seen_keys:
+              continue
+            entry = dict(model)
+            entry["id"] = model_key
+            entry["artifact_format"] = UNIFIED_ARTIFACT_FORMAT
+            entry["artifact_size"] = 0
+            entry["artifact_sha256"] = ""
+            entry["artifact_chunk_count"] = 0
+            entry["onnx_compile_only"] = True
+            supplemented.append(entry)
+            seen_keys.add(model_key)
+          break
+        if fetched_any:
+          break
+
+    return supplemented
+
   def _get_manifest(self, resource_urls: str | list[str]) -> tuple[str | None, list[dict]]:
     if isinstance(resource_urls, str):
       resource_urls = [resource_urls]
@@ -740,6 +809,7 @@ class ModelManager:
           if not filtered:
             continue
 
+          filtered = self._supplement_manifest_from_newer_generations(resource_urls, filtered)
           return manifest_version, filtered
 
     return None, []
@@ -836,7 +906,49 @@ class ModelManager:
 
     return list(discovered.values())
 
+  def _adopt_promoted_local_models(self, catalog_keys: set[str]):
+    """If a user previously compiled local-<id> and <id> is now in the catalog,
+    promote the local artifact in-place so it isn't duplicated or recompiled.
+    """
+    try:
+      local_files = sorted(MODELS_PATH.glob(f"{LOCAL_MODEL_PREFIX}*_driving_*"))
+    except Exception:
+      return
+
+    for local_file in local_files:
+      if not local_file.is_file():
+        continue
+      local_key, sep, suffix = local_file.name.partition("_driving_")
+      if not sep or not local_key.startswith(LOCAL_MODEL_PREFIX):
+        continue
+      promoted_key = self._canonical_model_key(local_key[len(LOCAL_MODEL_PREFIX):])
+      if not promoted_key or promoted_key not in catalog_keys:
+        continue
+
+      target_file = MODELS_PATH / f"{promoted_key}_driving_{suffix}"
+      try:
+        if not file_chunked_exists(target_file):
+          local_file.replace(target_file)
+        else:
+          delete_file(local_file, print_error=False)
+        sidecar = MODELS_PATH / f"{local_key}.json"
+        if sidecar.is_file():
+          delete_file(sidecar, print_error=False)
+      except Exception as error:
+        print(f"Failed to promote local model {local_key} -> {promoted_key}: {error}")
+        continue
+
+      for param_key in ("Model", "DrivingModel", ACTIVE_SMALL_MODEL_PARAM, ACTIVE_BIG_MODEL_PARAM):
+        if self._param_text(param_key) == local_key:
+          self.params.put(param_key, promoted_key)
+
   def update_model_params(self, model_info: list[dict], manifest_version: str):
+    catalog_keys = {
+      self._canonical_model_key(str(model.get("id") or "").strip())
+      for model in model_info
+      if model.get("id")
+    }
+    self._adopt_promoted_local_models(catalog_keys)
     model_info = list(model_info) + self._discover_local_models()
     self.available_models = [str(model.get("id") or "").strip() for model in model_info]
     self.available_model_names = [_clean_model_name(model.get("name")) for model in model_info]
@@ -1037,6 +1149,109 @@ class ModelManager:
     delete_chunked_artifact(file_path)
     return False
 
+  def _download_and_compile_onnx_model(self, model_key: str, artifact_metadata: dict, resource_urls: list[str]) -> bool:
+    """Download ONNX source(s) for a supplemental (e.g. v26-only) model, compile it on-device
+    for the current tinygrad runtime, install the compiled .pkl into MODELS_PATH, and remove
+    all temporary ONNX / build staging files afterwards.
+    """
+    model_key = self._canonical_model_key(model_key)
+    source_sha_map = artifact_metadata.get("source_sha256")
+    if isinstance(source_sha_map, dict) and source_sha_map:
+      onnx_targets = [(str(name).strip(), str(sha).strip().lower()) for name, sha in source_sha_map.items() if name]
+    else:
+      onnx_targets = [(f"{model_key}_driving_supercombo.onnx", "")]
+
+    stage_in = MODELS_PATH / f".tmp_onnx_in_{model_key}"
+    stage_out = MODELS_PATH / f".tmp_onnx_out_{model_key}"
+    shutil.rmtree(stage_in, ignore_errors=True)
+    shutil.rmtree(stage_out, ignore_errors=True)
+
+    try:
+      stage_in.mkdir(parents=True, exist_ok=True)
+      stage_out.mkdir(parents=True, exist_ok=True)
+
+      for remote_onnx_name, expected_sha in onnx_targets:
+        if Path(remote_onnx_name).name != remote_onnx_name:
+          return False
+        staged_onnx_path = stage_in / remote_onnx_name
+        downloaded = False
+        candidate_onnx_names = [remote_onnx_name]
+        if not expected_sha and remote_onnx_name != "driving_supercombo.onnx":
+          candidate_onnx_names.append("driving_supercombo.onnx")
+
+        for candidate_name in candidate_onnx_names:
+          for resource_url in resource_urls:
+            for onnx_url in self._onnx_source_urls(resource_url, model_key, candidate_name):
+              download_file(
+                CANCEL_DOWNLOAD_PARAM,
+                staged_onnx_path,
+                DOWNLOAD_PROGRESS_PARAM,
+                onnx_url,
+                MODEL_DOWNLOAD_PARAM,
+                self.params_memory,
+                allow_unknown_size=True,
+                suppress_errors=True,
+              )
+              if self.params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
+                return False
+              if staged_onnx_path.is_file() and verify_download(
+                staged_onnx_path,
+                onnx_url,
+                allow_unknown_size=True,
+                expected_sha256=expected_sha or None,
+              ):
+                downloaded = True
+                break
+              delete_file(staged_onnx_path, print_error=False)
+            if downloaded:
+              break
+          if downloaded:
+            break
+
+        if not downloaded:
+          return False
+
+      if self.params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
+        return False
+
+      self.params_memory.put(DOWNLOAD_PROGRESS_PARAM, "Compiling model...")
+      version = (
+        str(artifact_metadata.get("version") or "").strip()
+        or self._model_version_map().get(model_key, "")
+        or "v16"
+      )
+      external_gpu = bool(artifact_metadata.get("uses_external_gpu", False))
+      cmd = [
+        sys.executable,
+        str(MODEL_COMPILER_SCRIPT),
+        "--model", model_key,
+        "--input-dir", str(stage_in),
+        "--output-dir", str(stage_out),
+        "--no-split",
+        "--no-install",
+      ]
+      if version:
+        cmd.extend(["--version", version])
+      if external_gpu:
+        cmd.append("--gpu")
+
+      subprocess.run(cmd, check=True)
+      compiled_filename = driving_artifact_filename(model_key)
+      compiled_path = stage_out / compiled_filename
+      if not compiled_path.is_file() or compiled_path.stat().st_size <= 0:
+        return False
+
+      destination = MODELS_PATH / compiled_filename
+      delete_chunked_artifact(destination)
+      compiled_path.replace(destination)
+      return True
+    except Exception as error:
+      print(f"On-demand ONNX compilation failed for {model_key}: {error}")
+      return False
+    finally:
+      shutil.rmtree(stage_in, ignore_errors=True)
+      shutil.rmtree(stage_out, ignore_errors=True)
+
   def download_model_accelerator(self, model_key: str, accelerator: str = MODEL_LAB_ACCELERATOR) -> bool:
     self.downloading_model = True
     model_key = self._canonical_model_key(model_key)
@@ -1124,6 +1339,20 @@ class ModelManager:
       self.downloading_model = False
       return
 
+    if bool(artifact_metadata.get("onnx_compile_only", False)):
+      target_path = MODELS_PATH / required_files[0]
+      if not self._download_and_compile_onnx_model(model_to_download, artifact_metadata, resource_urls):
+        if self.params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
+          handle_error(None, "Download cancelled...", "Download cancelled...", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, self.params_memory)
+        else:
+          handle_error(target_path, "Model compilation failed...", f"Compilation failed for {model_to_download}", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, self.params_memory)
+        self.downloading_model = False
+        return
+      self.params_memory.put(DOWNLOAD_PROGRESS_PARAM, "Downloaded!")
+      self.params_memory.remove(MODEL_DOWNLOAD_PARAM)
+      self.downloading_model = False
+      return
+
     for filename in required_files:
       file_path = MODELS_PATH / filename
       remote_filename = str(artifact_metadata.get("artifact_filename") or filename).strip()
@@ -1166,12 +1395,16 @@ class ModelManager:
     self.update_model_params(model_info, manifest_version or "unknown")
 
     artifact_format_map = self._model_artifact_format_map()
+    artifact_metadata_map = self._load_artifact_metadata_map()
     for model_key, model_name in zip(self.available_models, self.available_model_names):
       if self.params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
         handle_error(None, "Download cancelled...", "Download cancelled...", MODEL_DOWNLOAD_ALL_PARAM, DOWNLOAD_PROGRESS_PARAM, self.params_memory)
         return
 
       if is_local_model_key(model_key):
+        continue
+
+      if bool(artifact_metadata_map.get(self._canonical_model_key(model_key), {}).get("onnx_compile_only", False)):
         continue
 
       if model_uses_external_gpu(model_key) and not external_gpu_available() and not allow_gpu_without_gpu:

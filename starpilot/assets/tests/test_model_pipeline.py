@@ -767,3 +767,113 @@ def test_oversized_artifact_split_round_trip(tmp_path):
   assert len(chunk_paths) == 2
   assert b"".join(path.read_bytes() for path in chunk_paths) == artifact.read_bytes()
   assert (tmp_path / "model.pkl.chunkmanifest").read_text() == "2"
+
+
+def test_v26_supplemental_models_appear_in_catalog_and_compile_on_demand(tmp_path, monkeypatch):
+  monkeypatch.setattr(model_manager, "MODELS_PATH", tmp_path)
+  manager = object.__new__(ModelManager)
+
+  class FakeParams:
+    def __init__(self, values=None):
+      self.values = dict(values or {})
+
+    def get(self, key):
+      return self.values.get(key)
+
+    def get_bool(self, key):
+      return bool(self.values.get(key, False))
+
+    def get_default_value(self, key):
+      return "rdf43" if key in ("Model", "DrivingModel") else "v15"
+
+    def put(self, key, value):
+      self.values[key] = value
+
+    def remove(self, key):
+      self.values.pop(key, None)
+
+  manager.params = FakeParams({"Model": "local-chdriving", "DrivingModel": "local-chdriving"})
+  manager.params_memory = FakeParams()
+  manager.downloading_model = False
+
+  # 1. Existing local-chdriving_driving_tinygrad.pkl is automatically promoted when chdriving joins catalog
+  (tmp_path / "local-chdriving_driving_tinygrad.pkl").write_bytes(b"compiled-chdriving")
+  (tmp_path / "local-chdriving.json").write_text(json.dumps({"name": "CH Driving", "version": "v16"}))
+
+  onnx_bytes = b"onnx-payload"
+  onnx_sha = hashlib.sha256(onnx_bytes).hexdigest()
+  v25_payload = [
+    {"id": "rdf43", "name": "Regret Driven Framework V4", "version": "v15", "artifact_format": UNIFIED_ARTIFACT_FORMAT},
+  ]
+  v26_payload = [
+    {"id": "rdf43", "name": "Regret Driven Framework V4", "version": "v15", "artifact_format": "tinygrad_single_v1_arena"},
+    {
+      "id": "chdriving",
+      "name": "CH Driving",
+      "version": "v16",
+      "released": "2026-11-05",
+      "series": "OP Series",
+      "artifact_format": "tinygrad_single_v1_arena",
+      "artifact_size": 100583398,
+      "source_sha256": {"chdriving_driving_supercombo.onnx": onnx_sha},
+    },
+  ]
+
+  def fake_fetch(url):
+    if "model_names_v25.json" in url:
+      return v25_payload
+    if "model_names_v26.json" in url:
+      return v26_payload
+    return []
+
+  monkeypatch.setattr(manager, "_fetch_manifest", fake_fetch)
+  manifest_ver, merged = manager._get_manifest(["https://huggingface.co/buckets/StarPilot-Driving/StarPilot-Resources/resolve"])
+  assert manifest_ver == "v25"
+  assert [m["id"] for m in merged] == ["rdf43", "chdriving"]
+  assert merged[1]["onnx_compile_only"] is True
+  assert merged[1]["artifact_format"] == UNIFIED_ARTIFACT_FORMAT
+  assert merged[1]["artifact_size"] == 0
+
+  manager.update_model_params(merged, manifest_ver)
+  assert (tmp_path / "chdriving_driving_tinygrad.pkl").read_bytes() == b"compiled-chdriving"
+  assert not (tmp_path / "local-chdriving_driving_tinygrad.pkl").exists()
+  assert not (tmp_path / "local-chdriving.json").exists()
+  assert manager.params.values["DrivingModel"] == "chdriving"
+  assert manager._is_model_downloaded("chdriving", UNIFIED_ARTIFACT_FORMAT)
+
+  # 2. On-demand download + compile when not yet installed (and skipped by Download All)
+  (tmp_path / "chdriving_driving_tinygrad.pkl").unlink()
+  assert not manager._is_model_downloaded("chdriving", UNIFIED_ARTIFACT_FORMAT)
+
+  monkeypatch.setattr(model_manager, "get_resource_urls", lambda: ["https://huggingface.co/buckets/StarPilot-Driving/StarPilot-Resources/resolve"])
+  orig_download_model = manager._download_model
+  downloaded_during_all = []
+  monkeypatch.setattr(manager, "_download_model", lambda key, allow_gpu: downloaded_during_all.append(key))
+  manager._download_all_models(allow_gpu_without_gpu=False)
+  assert "chdriving" not in downloaded_during_all
+
+  # Restore real _download_model and verify on-demand ONNX fetch + compile + cleanup
+  monkeypatch.setattr(manager, "_download_model", orig_download_model)
+  monkeypatch.setattr(download_functions, "get_remote_file_size", lambda *a, **kw: len(onnx_bytes))
+
+  def fake_download_file(cancel_param, dest, progress_param, url, download_param, params_memory, **kwargs):
+    del cancel_param, progress_param, url, download_param, params_memory, kwargs
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(onnx_bytes)
+    return True
+
+  def fake_compile_run(cmd, check=True):
+    assert check is True
+    assert "--model" in cmd and "chdriving" in cmd
+    out_dir = Path(cmd[cmd.index("--output-dir") + 1])
+    (out_dir / "chdriving_driving_tinygrad.pkl").write_bytes(b"fresh-compiled-v25-pkl")
+
+  monkeypatch.setattr(model_manager, "download_file", fake_download_file)
+  monkeypatch.setattr(model_manager.subprocess, "run", fake_compile_run)
+
+  manager.download_model("chdriving")
+  assert (tmp_path / "chdriving_driving_tinygrad.pkl").read_bytes() == b"fresh-compiled-v25-pkl"
+  assert not (tmp_path / ".tmp_onnx_in_chdriving").exists()
+  assert not (tmp_path / ".tmp_onnx_out_chdriving").exists()
+  assert manager.params_memory.values[model_manager.DOWNLOAD_PROGRESS_PARAM] == "Downloaded!"
+
