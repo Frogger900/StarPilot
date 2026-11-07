@@ -1045,8 +1045,8 @@ def test_lkas_hud_cornering_and_blinker_gates():
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 
-  # 2. Cornering gate: steering angle >= 45 deg suppresses both lines (0)
-  CS.out.steeringAngleDeg = 48.0
+  # 2. Cornering gate: steering angle >= 35 deg suppresses both lines (0)
+  CS.out.steeringAngleDeg = 36.0
   controller.frame = 10
   _, sends = controller.update(CC, CS, 100_000_000)
   parser.update([(2, [m for m in sends if m[0] in (0x122, 0x322)])])
@@ -1061,12 +1061,24 @@ def test_lkas_hud_cornering_and_blinker_gates():
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 
-  # 4. Left blinker active: left line suppressed (0), right line stays visible (1)
+  # 4. Left blinker active in LKA: left line suppressed (0), right line stays visible (1)
   CS.out.leftBlinker = True
   controller.frame = 30
   _, sends = controller.update(CC, CS, 300_000_000)
   parser.update([(4, [m for m in sends if m[0] in (0x122, 0x322)])])
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
+
+  # 5. In MADS/AOL (lka_armed=False), blinker and >= 35 deg wheel angle do NOT blank visible lines
+  CS.lka_armed = False
+  CS.aol_enabled = True
+  CS.out.leftBlinker = True
+  CS.out.rightBlinker = True
+  CS.out.steeringAngleDeg = 38.0
+  controller.frame = 40
+  _, sends = controller.update(CC, CS, 400_000_000)
+  parser.update([(5, [m for m in sends if m[0] in (0x122, 0x322)])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 
 
@@ -1985,7 +1997,7 @@ def test_legacy_2025_mads_green_wheel_park_standstill_override_and_mode_switch()
        in passive standby, and during active LKA nudges.
   3) Switching from MADS to LKA standby (lka_armed=True, lka_nudge_active=False) immediately
      drops LKAS_Request to 0 without a 2-tick overlap even if CC.latActive is still True.
-  4) Already-latched amber departure line (3) on 0x322 is not truncated by the 45-deg cornering gate.
+  4) Already-latched amber departure line (3) on 0x322 is not truncated by the 35-deg cornering gate.
   """
   cp_legacy = CarInterface.get_non_essential_params(CAR.SUBARU_LEGACY_2025)
   controller = CarController({}, cp_legacy)
@@ -2103,10 +2115,10 @@ def test_legacy_2025_mads_green_wheel_park_standstill_override_and_mode_switch()
   assert angle_parser.vl["ES_LKAS_ANGLE"]["LKAS_Request"] == 0
   assert state_parser.vl["ES_LKAS_State"]["LKAS_Dash_State"] == 1
 
-  # 6. Amber departure line (leftLaneDepart=True) stays 3 across 45-deg cornering gate while right white line hides (0)
+  # 6. Amber departure line (leftLaneDepart=True) stays 3 across 35-deg cornering gate while right white line hides (0)
   CC.latActive = False
   CC.hudControl.leftLaneDepart = True
-  CS.out.steeringAngleDeg = 48.0
+  CS.out.steeringAngleDeg = 38.0
   step_ctrl()
   assert state_parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 3
   assert state_parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0

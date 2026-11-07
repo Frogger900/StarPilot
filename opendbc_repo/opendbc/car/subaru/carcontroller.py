@@ -696,9 +696,9 @@ class CarController(CarControllerBase):
                 self.right_line_debounce_cnt = 0
 
               steer_angle_deg = abs(getattr(CS.out, "steeringAngleDeg", 0.0))
-              # In Continuous Centering (not self.lka_armed), do NOT cut out lines on 45-deg wheel angle or speed;
-              # track all the way down to 0 mph. Cornering gate (>= 45 deg) applies only in LKA-Only mode.
-              steer_gate = (steer_angle_deg >= 45.0) if self.lka_armed else False
+              # In Continuous Centering (not self.lka_armed), do NOT cut out lines on 35-deg wheel angle, speed, or blinkers;
+              # track all the way down to 0 mph. Cornering gate (>= 35 deg) and blinker line blanking apply only in LKA-Only mode.
+              steer_gate = (steer_angle_deg >= 35.0) if self.lka_armed else False
               left_blinker = bool(getattr(CS.out, "leftBlinker", False))
               right_blinker = bool(getattr(CS.out, "rightBlinker", False))
               left_depart = (raw_left_depart or self.left_depart_latched) and not left_blinker
@@ -708,14 +708,14 @@ class CarController(CarControllerBase):
 
               if left_depart:
                 left_line = 3  # Amber nudge line on cluster (immediate, no debounce)
-              elif steer_gate or left_blinker:
+              elif steer_gate or (self.lka_armed and left_blinker):
                 left_line = 0
               else:
                 left_line = 1 if self.left_line_vis_debounced else 0
 
               if right_depart:
                 right_line = 3  # Amber nudge line on cluster (immediate, no debounce)
-              elif steer_gate or right_blinker:
+              elif steer_gate or (self.lka_armed and right_blinker):
                 right_line = 0
               else:
                 right_line = 1 if self.right_line_vis_debounced else 0
