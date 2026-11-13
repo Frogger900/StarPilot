@@ -1061,13 +1061,22 @@ def test_lkas_hud_cornering_and_blinker_gates():
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 
-  # 4. Left blinker active in LKA: left line suppressed (0), right line stays visible (1)
+  # 4. Left or right blinker active in LKA: BOTH lines suppressed (0) immediately
   CS.out.leftBlinker = True
   controller.frame = 30
   _, sends = controller.update(CC, CS, 300_000_000)
   parser.update([(4, [m for m in sends if m[0] in (0x122, 0x322)])])
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
-  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+
+  CS.out.leftBlinker = False
+  CS.out.rightBlinker = True
+  controller.frame = 40
+  _, sends = controller.update(CC, CS, 400_000_000)
+  parser.update([(5, [m for m in sends if m[0] in (0x122, 0x322)])])
+  assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 0
+  assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 0
+  CS.out.rightBlinker = False
 
   # 5. In MADS/AOL (lka_armed=False), blinker and >= 35 deg wheel angle do NOT blank visible lines
   CS.lka_armed = False
@@ -1075,9 +1084,9 @@ def test_lkas_hud_cornering_and_blinker_gates():
   CS.out.leftBlinker = True
   CS.out.rightBlinker = True
   CS.out.steeringAngleDeg = 38.0
-  controller.frame = 40
-  _, sends = controller.update(CC, CS, 400_000_000)
-  parser.update([(5, [m for m in sends if m[0] in (0x122, 0x322)])])
+  controller.frame = 50
+  _, sends = controller.update(CC, CS, 500_000_000)
+  parser.update([(6, [m for m in sends if m[0] in (0x122, 0x322)])])
   assert parser.vl["ES_LKAS_State"]["LKAS_Left_Line_Visible"] == 1
   assert parser.vl["ES_LKAS_State"]["LKAS_Right_Line_Visible"] == 1
 

@@ -41,7 +41,7 @@ POST_ARREST_INWARD_CAN_TORQUE = 80.0       # Inward recovery CAN torque releasin
 POST_ARREST_CONFIRM_TIME_S = 0.04          # 40 ms debounce for post-arrest release
 POST_ARREST_COOLDOWN_S = 0.50              # Brief cooldown after driver takes over from an arrested drift
 CORNERING_GATE_ANGLE_DEG = 35.0            # degrees (suppress assist at and above 35 deg of wheel turn)
-POST_CORNERING_COOLDOWN_S = 0.50           # seconds to wait after unwinding below cornering angle gate
+POST_CORNERING_COOLDOWN_S = 1.0            # seconds to wait after unwinding below cornering angle gate
 APEX_CUT_BUFFER_M = 0.12                   # meters (reduce trigger margin on inside curve apex)
 POST_BLINKER_COOLDOWN_S = 2.0              # seconds to wait after turn signal auto-cancels
 
@@ -262,18 +262,19 @@ class LaneKeepController:
       self.reset()
       return
 
-    # 4. Turn Signal Handlers & Cooldown Timers
-    if left_blinker:
+    # 4. Turn Signal Handlers & Cooldown Timers (either turn signal stops LKA completely on both sides)
+    any_blinker = bool(left_blinker or right_blinker)
+    if any_blinker:
       self._blinker_cooldown_left = POST_BLINKER_COOLDOWN_S
-    elif self._blinker_cooldown_left > 0.0:
-      self._blinker_cooldown_left = max(0.0, self._blinker_cooldown_left - dt)
-
-    if right_blinker:
       self._blinker_cooldown_right = POST_BLINKER_COOLDOWN_S
-    elif self._blinker_cooldown_right > 0.0:
-      self._blinker_cooldown_right = max(0.0, self._blinker_cooldown_right - dt)
+    else:
+      if self._blinker_cooldown_left > 0.0:
+        self._blinker_cooldown_left = max(0.0, self._blinker_cooldown_left - dt)
+      if self._blinker_cooldown_right > 0.0:
+        self._blinker_cooldown_right = max(0.0, self._blinker_cooldown_right - dt)
+    blinker_suppressed = any_blinker or (self._blinker_cooldown_left > 0.0) or (self._blinker_cooldown_right > 0.0)
 
-    # 5. Cornering Suppression Gate (Physical wheel turned >= 35 deg + 0.5s unwind cooldown)
+    # 5. Cornering Suppression Gate (Physical wheel turned >= 35 deg + 1.0s unwind cooldown)
     if abs(steering_angle_deg) >= CORNERING_GATE_ANGLE_DEG:
       self._cornering_cooldown = POST_CORNERING_COOLDOWN_S
     elif self._cornering_cooldown > 0.0:
@@ -350,6 +351,12 @@ class LaneKeepController:
         self._prev_d_right = None
         self._d_dot_right = 0.0
 
+    if blinker_suppressed:
+      self._d_dot_left = 0.0
+      self._d_dot_right = 0.0
+      self._prev_d_left = d_left if left_line_visible else None
+      self._prev_d_right = d_right if right_line_visible else None
+
     d_dot_left = self._d_dot_left
     d_dot_right = self._d_dot_right
 
@@ -382,12 +389,12 @@ class LaneKeepController:
       ttc_prox_right = min(ttc_line_prox, max(0.0, (half_clearance - 0.06) - d_thresh_right))
 
     # Proximity-gated & debounced TTC triggers
-    if left_line_visible and not steer_suppressed and d_left < (d_thresh_left + ttc_prox_left) and ttc_left < ttc_thresh:
+    if left_line_visible and not steer_suppressed and not blinker_suppressed and d_left < (d_thresh_left + ttc_prox_left) and ttc_left < ttc_thresh:
       self._ttc_left_timer += dt
     else:
       self._ttc_left_timer = 0.0
 
-    if right_line_visible and not steer_suppressed and d_right < (d_thresh_right + ttc_prox_right) and ttc_right < ttc_thresh:
+    if right_line_visible and not steer_suppressed and not blinker_suppressed and d_right < (d_thresh_right + ttc_prox_right) and ttc_right < ttc_thresh:
       self._ttc_right_timer += dt
     else:
       self._ttc_right_timer = 0.0
@@ -412,14 +419,14 @@ class LaneKeepController:
     raw_trigger_left_line = (
       left_line_visible and
       not steer_suppressed and
-      self._blinker_cooldown_left <= 0.0 and
+      not blinker_suppressed and
       (d_left < (d_thresh_left + left_hyst) or self._ttc_left_timer >= TTC_CONFIRM_TIME_S or sustain_left_line)
     )
 
     raw_trigger_right_line = (
       right_line_visible and
       not steer_suppressed and
-      self._blinker_cooldown_right <= 0.0 and
+      not blinker_suppressed and
       (d_right < (d_thresh_right + right_hyst) or self._ttc_right_timer >= TTC_CONFIRM_TIME_S or sustain_right_line)
     )
 
@@ -550,7 +557,12 @@ class LaneKeepController:
     if not driver_override and not post_arrest_release:
       if trigger_left_line:
         is_left_nudge = True
-        raw_b_curv = self._left_line_curv
+        if right_line_visible and self._right_line_curv < -1.5e-4:
+          raw_b_curv = min(0.0, self._left_line_curv)
+        elif right_line_visible and self._right_line_curv > 1.5e-4 and self._left_line_curv > 1.5e-4:
+          raw_b_curv = min(self._left_line_curv, self._right_line_curv)
+        else:
+          raw_b_curv = self._left_line_curv
         if not self.active:
           self.boundary_curvature = raw_b_curv
         else:
@@ -566,7 +578,12 @@ class LaneKeepController:
           target_curvature = float((kp * d_err + kd * vel_left) * recede_scale)
       elif trigger_right_line:
         is_right_nudge = True
-        raw_b_curv = self._right_line_curv
+        if left_line_visible and self._left_line_curv > 1.5e-4:
+          raw_b_curv = max(0.0, self._right_line_curv)
+        elif left_line_visible and self._left_line_curv < -1.5e-4 and self._right_line_curv < -1.5e-4:
+          raw_b_curv = max(self._left_line_curv, self._right_line_curv)
+        else:
+          raw_b_curv = self._right_line_curv
         if not self.active:
           self.boundary_curvature = raw_b_curv
         else:
@@ -634,6 +651,22 @@ class LaneKeepController:
     else:
       self.alert = LaneKeepAlert.NONE
 
+    if blinker_suppressed:
+      self.nudge_active = False
+      self.active = False
+      self.desired_curvature = 0.0
+      self._prev_curvature = 0.0
+      self.desired_lat_accel = 0.0
+      self.boundary_curvature = 0.0
+      self._nudge_side = None
+      self._episode_timer = 0.0
+      self._left_yellow_hold = 0.0
+      self._right_yellow_hold = 0.0
+      self.left_line_state = 0
+      self.right_line_state = 0
+      self.gradient_opacity = 0.0
+      return
+
     self.nudge_active = bool(actively_nudging and not override_active and not self._lockout)
 
     # 12. Asymmetric S-Curve Envelope Smoothing Filter (gentle onset, crisp release, fast yield on override)
@@ -662,17 +695,13 @@ class LaneKeepController:
     else:
       active_side = None
 
-    if self._blinker_cooldown_left > 0.0:
-      self._left_yellow_hold = 0.0
-    elif not steer_suppressed and active_side == "left":
+    if not steer_suppressed and active_side == "left":
       self._left_yellow_hold = YELLOW_LINE_HOLD_S
       self._right_yellow_hold = 0.0
     else:
       self._left_yellow_hold = max(0.0, self._left_yellow_hold - dt)
 
-    if self._blinker_cooldown_right > 0.0:
-      self._right_yellow_hold = 0.0
-    elif not steer_suppressed and active_side == "right":
+    if not steer_suppressed and active_side == "right":
       self._right_yellow_hold = YELLOW_LINE_HOLD_S
       self._left_yellow_hold = 0.0
     else:
@@ -681,20 +710,16 @@ class LaneKeepController:
     left_yellow = (not steer_suppressed and active_side == "left") or (self._left_yellow_hold > 0.0)
     right_yellow = (not steer_suppressed and active_side == "right") or (self._right_yellow_hold > 0.0)
 
-    # Suppressed during sharp cornering (>= 35 deg + 0.5s unwind cooldown) for white lines and new triggers,
+    # Suppressed during sharp cornering (>= 35 deg + 1.0s unwind cooldown) for white lines and new triggers,
     # while allowing an already-latched >= 1.0s amber hold to finish cleanly without truncation.
-    if self._blinker_cooldown_left > 0.0:
-      self.left_line_state = 0
-    elif left_yellow:
+    if left_yellow:
       self.left_line_state = 3  # Amber / Yellow
     elif not steer_suppressed and left_line_visible:
       self.left_line_state = 1  # Solid White
     else:
       self.left_line_state = 0
 
-    if self._blinker_cooldown_right > 0.0:
-      self.right_line_state = 0
-    elif right_yellow:
+    if right_yellow:
       self.right_line_state = 3  # Amber / Yellow
     elif not steer_suppressed and right_line_visible:
       self.right_line_state = 1  # Solid White

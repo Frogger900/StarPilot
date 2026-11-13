@@ -669,31 +669,38 @@ class CarController(CarControllerBase):
               # 1 (White): LKA-Only standby/nudge, OR Continuous Centering manually overridden
               wheel_ready = True
 
-              # Line debouncing (immediate seed when freshly armed; 1.0s = 10 frames @ 10 Hz debounce thereafter)
+              # Line debouncing (immediate sync in LKA-Only mode since lanekeep.py handles all gating/cooldowns;
+              # 1.0s = 10 frames @ 10 Hz debounce in Continuous Centering mode)
               raw_left_vis = bool(hud_control.leftLaneVisible)
               raw_right_vis = bool(hud_control.rightLaneVisible)
 
-              if self.left_line_vis_debounced is None:
+              if self.lka_armed:
                 self.left_line_vis_debounced = raw_left_vis
                 self.left_line_debounce_cnt = 0
-              elif raw_left_vis != self.left_line_vis_debounced:
-                self.left_line_debounce_cnt += 1
-                if self.left_line_debounce_cnt >= 10:
-                  self.left_line_vis_debounced = raw_left_vis
-                  self.left_line_debounce_cnt = 0
-              else:
-                self.left_line_debounce_cnt = 0
-
-              if self.right_line_vis_debounced is None:
                 self.right_line_vis_debounced = raw_right_vis
                 self.right_line_debounce_cnt = 0
-              elif raw_right_vis != self.right_line_vis_debounced:
-                self.right_line_debounce_cnt += 1
-                if self.right_line_debounce_cnt >= 10:
+              else:
+                if self.left_line_vis_debounced is None:
+                  self.left_line_vis_debounced = raw_left_vis
+                  self.left_line_debounce_cnt = 0
+                elif raw_left_vis != self.left_line_vis_debounced:
+                  self.left_line_debounce_cnt += 1
+                  if self.left_line_debounce_cnt >= 10:
+                    self.left_line_vis_debounced = raw_left_vis
+                    self.left_line_debounce_cnt = 0
+                else:
+                  self.left_line_debounce_cnt = 0
+
+                if self.right_line_vis_debounced is None:
                   self.right_line_vis_debounced = raw_right_vis
                   self.right_line_debounce_cnt = 0
-              else:
-                self.right_line_debounce_cnt = 0
+                elif raw_right_vis != self.right_line_vis_debounced:
+                  self.right_line_debounce_cnt += 1
+                  if self.right_line_debounce_cnt >= 10:
+                    self.right_line_vis_debounced = raw_right_vis
+                    self.right_line_debounce_cnt = 0
+                else:
+                  self.right_line_debounce_cnt = 0
 
               steer_angle_deg = abs(getattr(CS.out, "steeringAngleDeg", 0.0))
               # In Continuous Centering (not self.lka_armed), do NOT cut out lines on 35-deg wheel angle, speed, or blinkers;
@@ -701,24 +708,33 @@ class CarController(CarControllerBase):
               steer_gate = (steer_angle_deg >= 35.0) if self.lka_armed else False
               left_blinker = bool(getattr(CS.out, "leftBlinker", False))
               right_blinker = bool(getattr(CS.out, "rightBlinker", False))
-              left_depart = (raw_left_depart or self.left_depart_latched) and not left_blinker
-              right_depart = (raw_right_depart or self.right_depart_latched) and not right_blinker
-              self.left_depart_latched = raw_left_depart
-              self.right_depart_latched = raw_right_depart
-
-              if left_depart:
-                left_line = 3  # Amber nudge line on cluster (immediate, no debounce)
-              elif steer_gate or (self.lka_armed and left_blinker):
+              blinker_gate = self.lka_armed and (left_blinker or right_blinker)
+              if blinker_gate:
+                self.left_depart_latched = False
+                self.right_depart_latched = False
+                left_depart = False
+                right_depart = False
                 left_line = 0
-              else:
-                left_line = 1 if self.left_line_vis_debounced else 0
-
-              if right_depart:
-                right_line = 3  # Amber nudge line on cluster (immediate, no debounce)
-              elif steer_gate or (self.lka_armed and right_blinker):
                 right_line = 0
               else:
-                right_line = 1 if self.right_line_vis_debounced else 0
+                left_depart = (raw_left_depart or self.left_depart_latched) and not left_blinker
+                right_depart = (raw_right_depart or self.right_depart_latched) and not right_blinker
+                self.left_depart_latched = raw_left_depart
+                self.right_depart_latched = raw_right_depart
+
+                if left_depart:
+                  left_line = 3  # Amber nudge line on cluster (immediate, no debounce)
+                elif steer_gate:
+                  left_line = 0
+                else:
+                  left_line = 1 if self.left_line_vis_debounced else 0
+
+                if right_depart:
+                  right_line = 3  # Amber nudge line on cluster (immediate, no debounce)
+                elif steer_gate:
+                  right_line = 0
+                else:
+                  right_line = 1 if self.right_line_vis_debounced else 0
 
             can_sends.append(subarucan.create_es_lkas_state(
               self.packer, self.frame // 10, CS.es_lkas_state_msg, self._lkas_status_active(CC), hud_control.visualAlert,

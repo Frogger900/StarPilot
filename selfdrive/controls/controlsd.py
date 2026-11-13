@@ -406,6 +406,7 @@ class Controls:
     self.lane_centering = LaneCenteringController()
     self.lka = LaneKeepController()
     self.lka_entry_curvature = 0.0
+    self.lka_entry_side = None
     self.lka_entry_cooldown = 0.0
     self.lka_parallel_blend = 0.0
     self.lka_release_blend = 0.0
@@ -589,17 +590,25 @@ class Controls:
 
     lka_actuating = (not centering_lat_active) and lka_can_run and self.lka.active
     if lka_actuating:
-      if not self.lka_was_active and self.lka_entry_cooldown <= 0.0:
+      cur_lka_side = "right" if (self.lka.desired_curvature < 0.0 or (self.lka.desired_curvature == 0.0 and self.lka.right_line_state == 3)) else "left"
+      if (not self.lka_was_active and self.lka_entry_cooldown <= 0.0) or self.lka_entry_side != cur_lka_side:
         self.lka_entry_curvature = self.curvature
         self.lka_parallel_blend = 0.0
+      elif not self.lka_was_active:
+        if cur_lka_side == "left":
+          self.lka_entry_curvature = min(self.lka_entry_curvature, self.curvature)
+        else:
+          self.lka_entry_curvature = max(self.lka_entry_curvature, self.curvature)
       if not self.lka_was_active:
         self.lka_release_blend = 0.0
-      self.lka_entry_cooldown = 0.75
+      self.lka_entry_side = cur_lka_side
+      self.lka_entry_cooldown = 1.50
       CC.latActive = True
     else:
       self.lka_entry_cooldown = max(0.0, self.lka_entry_cooldown - DT_CTRL)
       if self.lka_entry_cooldown <= 0.0:
         self.lka_parallel_blend = 0.0
+        self.lka_entry_side = None
       else:
         self.lka_parallel_blend *= float(0.25 / (0.25 + DT_CTRL))
       self.lka_release_blend = 0.0
@@ -650,18 +659,14 @@ class Controls:
       # nudge so the car aligns parallel to the line without pushing into mid-lane.
       b_curv = float(getattr(self.lka, "boundary_curvature", 0.0))
       v2_eff = max(CS.vEgo * CS.vEgo, 25.0)
-      max_align_curv = 0.24 / v2_eff
+      max_align_curv = 0.18 / v2_eff
       nudge_right = (self.lka.desired_curvature > 0.0) or (
         self.lka.desired_curvature == 0.0 and self.lka.left_line_state == 3
       )
       if nudge_right:
-        if self.curvature > self.lka_entry_curvature and b_curv > self.lka_entry_curvature:
-          self.lka_entry_curvature = max(self.lka_entry_curvature, min(self.curvature, b_curv))
         parallel_curv = max(self.lka_entry_curvature, min(b_curv, self.lka_entry_curvature + max_align_curv))
         base_start = self.lka_entry_curvature
       else:
-        if self.curvature < self.lka_entry_curvature and b_curv < self.lka_entry_curvature:
-          self.lka_entry_curvature = min(self.lka_entry_curvature, max(self.curvature, b_curv))
         parallel_curv = min(self.lka_entry_curvature, max(b_curv, self.lka_entry_curvature - max_align_curv))
         base_start = self.lka_entry_curvature
 
@@ -694,19 +699,22 @@ class Controls:
       # LKA holds parallel to the line instead of shoving back toward lane center.
       curve_aligned = (
         (nudge_right and self.curvature > 1.5e-4 and self.curvature >= parallel_curv - 1.0e-4) or
-        (not nudge_right and self.curvature < -1.5e-4 and self.curvature <= parallel_curv + 1.0e-4)
+        (not nudge_right and self.curvature < -1.5e-4 and self.curvature <= parallel_curv + 1.0e-4) or
+        (abs(d_dot_cur) <= 0.03 and (
+          (nudge_right and self.curvature >= self.lka_entry_curvature + 1.2e-4) or
+          (not nudge_right and self.curvature <= self.lka_entry_curvature - 1.2e-4)
+        ))
       )
       drift_arrested_frac = min(max((d_dot_cur + 0.02) / 0.025, 0.0), 1.0) if curve_aligned else 0.0
       lka_offset *= (1.0 - 0.65 * drift_arrested_frac)
       target_curv = baseline_curv + lka_offset
-      max_nudge_curv = (0.40 - 0.22 * drift_arrested_frac) / v2_eff
-      max_entry_curv = 0.45 / v2_eff
+      max_nudge_curv = (0.34 - 0.20 * drift_arrested_frac) / v2_eff
+      max_entry_curv = 0.36 / v2_eff
       if nudge_right:
         target_curv = min(target_curv, parallel_curv + max_nudge_curv, self.lka_entry_curvature + max_entry_curv)
-        guided_curv = max(target_curv, self.curvature)
       else:
         target_curv = max(target_curv, parallel_curv - max_nudge_curv, self.lka_entry_curvature - max_entry_curv)
-        guided_curv = min(target_curv, self.curvature)
+      guided_curv = target_curv
       new_desired_curvature = guided_curv + rel_blend * (self.curvature - guided_curv)
     else:
       # Steering PID loop and lateral MPC

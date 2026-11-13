@@ -274,7 +274,7 @@ def test_cornering_and_blinker_gates():
 
   lka.reset(full=True)
 
-  # 2. Left Blinker Gate: Left line turns off, nudge suppressed
+  # 2. Left Blinker Gate: Stops LKA completely on BOTH sides (no lines, no assist, cancels active hold)
   lka.update(
     model,
     v_ego=30.0 * CV.MPH_TO_MS,
@@ -284,9 +284,41 @@ def test_cornering_and_blinker_gates():
     right_blinker=False,
     lat_active=False,
   )
+  assert not lka.active
   assert lka.left_line_state == 0
-  assert lka.right_line_state == 1
+  assert lka.right_line_state == 0
   assert lka._blinker_cooldown_left == 2.0
+  assert lka._blinker_cooldown_right == 2.0
+
+  # Crossing the divided line onto the right side mid-lane-change while left blinker is on
+  # (or during the 2.0s post-blinker cooldown) must stay suppressed on BOTH sides.
+  right_cross = _make_model(left_y=-2.5, right_y=0.92)
+  lka.update(
+    right_cross,
+    v_ego=30.0 * CV.MPH_TO_MS,
+    steering_angle_deg=0.0,
+    steering_torque=0.0,
+    left_blinker=True,
+    right_blinker=False,
+    lat_active=False,
+  )
+  assert not lka.active
+  assert lka.left_line_state == 0
+  assert lka.right_line_state == 0
+
+  for _ in range(50):  # 0.5s into 2.0s post-blinker cooldown with blinker now off
+    lka.update(
+      right_cross,
+      v_ego=30.0 * CV.MPH_TO_MS,
+      steering_angle_deg=0.0,
+      steering_torque=0.0,
+      left_blinker=False,
+      right_blinker=False,
+      lat_active=False,
+    )
+    assert not lka.active
+    assert lka.left_line_state == 0
+    assert lka.right_line_state == 0
 
 
 def test_driver_override():
@@ -895,7 +927,7 @@ def test_single_line_reduced_sensitivity_road_edge_pinch_and_cornering_unwind_co
     assert not lka.active
     assert lka.desired_curvature == 0.0
 
-  # 3. 35-deg cornering gate + 0.50s unwind cooldown
+  # 3. 35-deg cornering gate + 1.0s unwind cooldown
   lka.reset(full=True)
   two_line_cross = _make_model(left_y=-0.98, right_y=2.50)
   for step in range(10):
@@ -903,15 +935,59 @@ def test_single_line_reduced_sensitivity_road_edge_pinch_and_cornering_unwind_co
     assert not lka.active
     assert lka.left_line_state == 0
 
-  # Unwind wheel to 25 deg: suppressed for the first 0.45s of the 0.50s unwind cooldown
-  for step in range(45):
+  # Unwind wheel to 25 deg: suppressed for the first 0.95s of the 1.0s unwind cooldown
+  for step in range(95):
     lka.update(two_line_cross, v_ego=v_ego, steering_angle_deg=25.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
     assert not lka.active
+    assert lka.left_line_state == 0
 
-  # After 0.50s unwind cooldown expires, LKA resumes normally
+  # After 1.0s unwind cooldown expires, LKA resumes normally
   for step in range(15):
     lka.update(two_line_cross, v_ego=v_ego, steering_angle_deg=25.0, steering_torque=0.0, dt=0.01, model_updated=(step % 5 == 0))
   assert lka.active
   assert lka.left_line_state == 3
+
+
+def test_route_0127_seg18_no_multi_pulse_ratchet_or_false_boundary_curv():
+  """Regression test for route 00000127--8d1a77f100 Segment 18:
+  1) Noisy negative curvature on the right line while the opposite left line curves right
+     must not pull boundary_curvature negative on a right-side nudge.
+  2) Once the right boundary begins receding with driver straightening torque (-65 CAN units),
+     nudge_active and active release cleanly.
+  """
+  v_ego = 60.5 * CV.MPH_TO_MS
+  xs = np.linspace(0.0, 50.0, 52)
+  model = _make_model(left_y=-2.03, right_y=0.93)  # right tire near line, left line safe
+  model.laneLines[1] = SimpleNamespace(x=xs, y=-2.03 + 0.00055 * (xs ** 2))  # +0.0011 1/m right curve
+  model.laneLines[2] = SimpleNamespace(x=xs, y=0.93 - 0.00025 * (xs ** 2))   # -0.0005 1/m noisy opposite bend
+
+  lka = LaneKeepController()
+  for step in range(55):
+    lka.update(
+      model,
+      v_ego=v_ego,
+      steering_angle_deg=3.5,
+      steering_torque=0.0,
+      dt=0.01,
+      model_updated=(step % 5 == 0),
+    )
+  assert lka.active and lka.nudge_active
+  assert lka.boundary_curvature >= 0.0
+
+  # Boundary recedes slightly (0.93 -> 0.97) while driver applies straightening torque (-65 CAN units):
+  receding = _make_model(left_y=-1.99, right_y=0.97)
+  receding.laneLines[1] = SimpleNamespace(x=xs, y=-1.99 + 0.00055 * (xs ** 2))
+  receding.laneLines[2] = SimpleNamespace(x=xs, y=0.97 - 0.00025 * (xs ** 2))
+  for step in range(10):
+    lka.update(
+      receding,
+      v_ego=v_ego,
+      steering_angle_deg=3.8,
+      steering_torque=-65.0,
+      dt=0.01,
+      model_updated=(step % 5 == 0),
+    )
+  assert not lka.nudge_active
+  assert not lka.active
 
 
