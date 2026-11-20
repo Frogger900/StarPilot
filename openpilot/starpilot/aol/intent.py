@@ -32,6 +32,7 @@ class AolSettings:
   default_physical_buttons: bool = True
   main_wheel_action: bool = False
   lkas_wheel_action: bool = False
+  lka_enabled: bool = False
 
 
 def _button_value(params, key: str) -> int | None:
@@ -64,12 +65,17 @@ def read_settings(params) -> AolSettings:
   valid_pause = 0.0 <= pause_mps <= 100.0
   lkas = _button_value(params, 'LKASButtonControl')
   main = _button_value(params, 'MainCruiseButtonControl')
+  try:
+    lka_enabled = Path(params.get_param_path('LaneKeepAssist')).read_bytes() == b'1'
+  except OSError:
+    lka_enabled = False
   return AolSettings(
     enabled=params.get_bool('AlwaysOnLateral') and valid_pause, pause_brake_mps=pause_mps if valid_pause else 0.0,
     lkas_action=_axis_action(lkas), main_action=_axis_action(main),
     default_physical_buttons=lkas == 0 and main == 0,
     main_wheel_action=main == ADOPT_SPEED_LIMIT,
     lkas_wheel_action=lkas in (1, 2, 5, 6, 7, 8, 10, 11, 12, 13, 14),
+    lka_enabled=lka_enabled,
     distance_actions=(_button_action(params, 'DistanceButtonControl'),
                       _button_action(params, 'LongDistanceButtonControl'),
                       _button_action(params, 'VeryLongDistanceButtonControl')),
@@ -88,7 +94,7 @@ def independent_axis_requested(settings: AolSettings, *, include_auxiliary: bool
   actions = (settings.lkas_action, settings.main_action, *settings.distance_actions)
   if include_auxiliary:
     actions += (*settings.cancel_actions, *settings.mode_actions, *settings.custom_actions)
-  return settings.enabled or any(action in pause for action in actions)
+  return settings.enabled or settings.lka_enabled or any(action in pause for action in actions)
 
 
 PROCESS_FAULT_MAX_AGE_NS = 1_500_000_000
@@ -228,7 +234,7 @@ class AolCardIntent:
                    any(self._held.values()) or getattr(self, 'cancel_held', False) or
                    getattr(self, 'screen_held', False) or getattr(self, '_lkas_down', False) or
                    getattr(self, '_engagement_manual_withdrawal', False) or
-                   not self.settings.enabled or fault_active or not CS.canValid or CS.canTimeout or CS.steerFaultPermanent or
+                   not self._lateral_enabled() or fault_active or not CS.canValid or CS.canTimeout or CS.steerFaultPermanent or
                    CS.accFaulted or self._fault_inhibit or self._calibration_inhibit or
                    self._calibration_rearm_required or native_rejection_ns)
     # A local withdrawal also cancels pending preEnabled intent when Controls
@@ -253,7 +259,7 @@ class AolCardIntent:
         CS.gearShifter not in (GearShifter.park, GearShifter.neutral, GearShifter.reverse, GearShifter.unknown)):
       return
     self._engagement_consumed = True
-    if (blocked or not active or not self.settings.enabled or not CS.cruiseState.available or
+    if (blocked or not active or not self._lateral_enabled() or not CS.cruiseState.available or
         CS.gearShifter in (GearShifter.park, GearShifter.neutral, GearShifter.reverse, GearShifter.unknown)):
       return
     self._arm_from_full_engagement(CS, source_ns=source_ns)
@@ -262,6 +268,9 @@ class AolCardIntent:
     self.allowed_latch = True
     self.pause_lateral = False
     self._last_latch_edge_ns = source_ns
+
+  def _lateral_enabled(self) -> bool:
+    return self.settings.enabled
 
   def update(self, CS, *, consumed_buttons: frozenset[int] = frozenset(), fault_active: bool | None = None,
              now_ns: int = 0, native_rejection_ns: int = 0, standard_enabled: bool = False) -> None:
@@ -290,7 +299,7 @@ class AolCardIntent:
         self._timers[button] = 0
       return
 
-    if not self.settings.enabled:
+    if not self._lateral_enabled():
       self._record_latch_clear('settings_disabled')
       self.allowed_latch = False
       if self.explicit_latch:
@@ -305,7 +314,7 @@ class AolCardIntent:
       self._record_latch_clear('acc_fault')
       self.allowed_latch = False
       self._gesture_neutral_seen = False
-    elif self.settings.enabled and not self.explicit_latch and not lkas_managed and not main_managed:
+    elif self._lateral_enabled() and not self.explicit_latch and not lkas_managed and not main_managed:
       if not CS.cruiseState.available:
         self._record_latch_clear('cruise_unavailable')
       self.allowed_latch = bool(CS.cruiseState.available)
@@ -422,7 +431,7 @@ class AolCardIntent:
                   CS.gearShifter not in (GearShifter.park, GearShifter.neutral, GearShifter.reverse, GearShifter.unknown))
     if self._calibration_inhibit and self._calibration_fault and main_derived:
       self._calibration_rearm_required = True
-    elif self._calibration_rearm_required and fresh_edge and rearm_safe and self.settings.enabled:
+    elif self._calibration_rearm_required and fresh_edge and rearm_safe and self._lateral_enabled():
       self._calibration_rearm_required = False
     if self._calibration_fault or self._calibration_rearm_required:
       self._record_latch_clear('calibration_inhibit')
@@ -457,5 +466,5 @@ class AolCardIntent:
 
   def output(self, CS) -> tuple[bool, bool, bool]:
     driving = CS.gearShifter not in (GearShifter.neutral, GearShifter.park, GearShifter.reverse, GearShifter.unknown)
-    return (self.allowed_latch and self.settings.enabled and CS.canValid and driving,
+    return (self.allowed_latch and self._lateral_enabled() and CS.canValid and driving,
             self.pause_lateral or self._calibration_inhibit, self.pause_longitudinal or self._calibration_inhibit)

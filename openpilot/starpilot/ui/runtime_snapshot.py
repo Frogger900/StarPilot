@@ -671,11 +671,11 @@ class RuntimeSnapshotAdapter:
       display_message(sm, "carOutput", now_ns, after_frame=after) if started else None,
       display_message(sm, "vehicleParameters", now_ns, after_frame=after) if started else None, cp,
     )
-    legacy_2025_lateral_off = bool(
+    legacy_2025_lka_or_off = bool(
       cp is not None and getattr(cp, 'carFingerprint', '') == 'SUBARU_LEGACY_2025' and
       display_control is not None and not getattr(getattr(display_control, 'hudControl', None), 'lanesVisible', True)
     )
-    display_lat_active = bool(display_control.latActive) if (display_control is not None and not legacy_2025_lateral_off) else False
+    display_lat_active = bool(display_control.latActive) if (display_control is not None and not legacy_2025_lka_or_off) else False
     display_long_active = bool(display_control.longActive) if display_control is not None else False
     long_engaged = bool(display_selfdrive is not None and getattr(display_selfdrive, 'enabled', False))
     if getattr(ui, 'aol_runtime', False):
@@ -725,7 +725,7 @@ class RuntimeSnapshotAdapter:
           weather_location = (fix[1].latitude, fix[1].longitude)
           break
     aol_latched = (display_aol_latch(sm, now_ns, after_frame=after)
-                   if started and getattr(ui, "aol_runtime", False) and not legacy_2025_lateral_off else None)
+                   if started and getattr(ui, "aol_runtime", False) and not legacy_2025_lka_or_off else None)
     if cp is not None and getattr(cp, 'carFingerprint', '') == 'SUBARU_LEGACY_2025':
       armed_at_stop = False
       if (aol_latched and display_car_valid and

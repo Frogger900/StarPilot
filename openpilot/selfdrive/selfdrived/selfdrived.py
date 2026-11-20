@@ -1300,6 +1300,8 @@ class SelfdriveD:
       self.AM.alerts.pop("pcmDisable/userDisable", None)
       if self.CP.passive:
         self.legacy_2025_green_wheel_active = False
+        clear_event_types.add("lkaHandsOnWheel")
+        self.AM.alerts.pop("lkaHandsOnWheel/warning", None)
       elif self.sm.seen['carControl'] and self.sm.valid['carControl'] and CS.canValid and not CS.canTimeout:
         hud = self.sm['carControl'].hudControl
         green_wheel_active = bool(
@@ -1315,6 +1317,39 @@ class SelfdriveD:
           chime.event_type = "legacy2025AolChime"
           self.AM.alerts.pop("legacy2025AolDisengage/userDisable" if green_wheel_active else "legacy2025AolEngage/enable", None)
           alerts.append(chime)
+        lka_hands_warn = bool(
+          not hud.lanesVisible and
+          hud.visualAlert == car.CarControl.HUDControl.VisualAlert.steerRequired
+        )
+        if lka_hands_warn:
+          if hud.audibleAlert == car.CarControl.HUDControl.AudibleAlert.warningImmediate:
+            lka_alert = Alert(
+              "Take Control",
+              "Lane Keep Assist Off — Hands-Off Lockout",
+              log.SelfdriveState.AlertStatus.critical,
+              log.SelfdriveState.AlertSize.mid,
+              AlertPriority.HIGH,
+              car.CarControl.HUDControl.VisualAlert.none,
+              log.SelfdriveState.AudibleAlert.warningImmediate,
+              0.2,
+            )
+          else:
+            lka_alert = Alert(
+              "Keep Hands on Wheel",
+              "Lane Keep Assist Active",
+              log.SelfdriveState.AlertStatus.userPrompt,
+              log.SelfdriveState.AlertSize.mid,
+              AlertPriority.MID,
+              car.CarControl.HUDControl.VisualAlert.none,
+              log.SelfdriveState.AudibleAlert.warningSoft,
+              0.2,
+            )
+          lka_alert.alert_type = "lkaHandsOnWheel/warning"
+          lka_alert.event_type = "lkaHandsOnWheel"
+          alerts.append(lka_alert)
+        else:
+          clear_event_types.add("lkaHandsOnWheel")
+          self.AM.alerts.pop("lkaHandsOnWheel/warning", None)
     from openpilot.starpilot.audio.departure_alert import protect_safety_alerts
     retained = ()
     if departure:

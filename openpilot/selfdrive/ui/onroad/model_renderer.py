@@ -34,6 +34,14 @@ NO_THROTTLE_COLORS = [
   rl.Color(242, 242, 242, 0),   # HSLF(112/360, 0.0, 0.95, 0.0)
 ]
 
+LKA_AMBER_COLOR = rl.Color(255, 185, 0, 255)
+LKA_AMBER_COLORS = [
+  rl.Color(255, 185, 0, 140),
+  rl.Color(255, 185, 0, 100),
+  rl.Color(255, 185, 0, 0),
+]
+LKA_STANDBY_COLOR = rl.Color(145, 160, 180, 48)
+
 
 @dataclass
 class ModelPoints:
@@ -333,16 +341,47 @@ class ModelRenderer(ModelGeometry, Widget):
 
     return LeadVehicle(glow=glow, chevron=chevron, fill_alpha=int(fill_alpha))
 
+  @staticmethod
+  def _lka_hud_state(sm):
+    if sm is None:
+      return False, False, False, False
+    if isinstance(sm, dict):
+      if 'carControl' not in sm:
+        return False, False, False, False
+      has_cs = 'carState' in sm
+    else:
+      seen = getattr(sm, 'seen', None)
+      valid = getattr(sm, 'valid', None)
+      if seen is None or valid is None or not (seen['carControl'] and valid['carControl']):
+        return False, False, False, False
+      has_cs = bool(seen['carState'] and valid['carState'])
+    cc = sm['carControl']
+    hud = getattr(cc, 'hudControl', None)
+    if hud is None or not isinstance(getattr(cc, 'enabled', None), bool) or getattr(hud, 'lanesVisible', True):
+      return False, False, False, False
+    left_depart = bool(getattr(hud, 'leftLaneDepart', False))
+    right_depart = bool(getattr(hud, 'rightLaneDepart', False))
+    left_vis = bool(getattr(hud, 'leftLaneVisible', False))
+    right_vis = bool(getattr(hud, 'rightLaneVisible', False))
+    lat_active = bool(getattr(cc, 'latActive', False))
+    nudge = lat_active and (left_depart or right_depart)
+    cruise_avail = bool(sm['carState'].cruiseState.available) if has_cs else False
+    standby = (not lat_active) and (left_vis or right_vis) and cruise_avail
+    return nudge, standby, nudge and left_depart, nudge and right_depart
+
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
     self._lane_centering_direction = lane_centering_direction(ui_state.sm, ui_state.display_time_ns(), ui_state.started_frame)
+    _, _, lka_left, lka_right = self._lka_hud_state(getattr(ui_state, 'sm', None))
     for i, lane_line in enumerate(self._lane_lines):
       if lane_line.projected_points.size == 0:
         continue
 
       alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
       color = lane_color(getattr(self, "road_style", {}), False, rl.Color(255, 255, 255, int(alpha * 255)), alpha)
-      if (i == 1 and self._lane_centering_direction < 0) or (i == 2 and self._lane_centering_direction > 0):
+      if (i == 1 and lka_left) or (i == 2 and lka_right):
+        color = rl.Color(LKA_AMBER_COLOR.r, LKA_AMBER_COLOR.g, LKA_AMBER_COLOR.b, max(int(alpha * 255), 220))
+      elif (i == 1 and self._lane_centering_direction < 0) or (i == 2 and self._lane_centering_direction > 0):
         color = rl.Color(*BLUE, int(alpha * 255))
       draw_polygon(self._rect, lane_line.projected_points, color)
 

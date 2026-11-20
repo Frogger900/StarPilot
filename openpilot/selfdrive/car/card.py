@@ -1923,8 +1923,21 @@ class Car:
         from openpilot.starpilot.car.subaru.stop_start_caller import update as update_subaru_startup
         update_subaru_startup(self, now_nanos)
         if (self.CP.carFingerprint == "SUBARU_LEGACY_2025" and CS.cruiseState.available and
-            getattr(self.CI.CS, "_lkas_mode_settle_frames", 0) == 0):
-          self.CI.CS.lateral_off = not bool(CC.hudControl.lanesVisible)
+            getattr(self.CI.CS, "_lkas_mode_settle_frames", 0) == 0 and
+            bool(getattr(self.CI.CS, "aol_enabled", True))):
+          centering_active = bool(CC.hudControl.lanesVisible)
+          if (not self.CI.CS.lka_armed and not self.CI.CS.lateral_off) != centering_active:
+            if centering_active:
+              self.CI.CS.lka_armed = False
+              self.CI.CS.lateral_off = False
+            elif bool(getattr(self.CI.CS, "lka_enabled", False)):
+              self.CI.CS.lka_armed = True
+              self.CI.CS.lateral_off = False
+            else:
+              self.CI.CS.lka_armed = False
+              self.CI.CS.lateral_off = True
+            if bool(getattr(self.CI.CS, "lka_enabled", False)):
+              self.CI.CS.last_lateral_mode_centering = not self.CI.CS.lka_armed
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       self.publish_sendcan(can_sends, valid=CS.canValid)
       if learning_snapshot is not None and self.learning_send_committed_mono_ns:
@@ -2001,10 +2014,17 @@ class Car:
         self.aol_card_intent.settings = settings
       cs = getattr(getattr(self, "CI", None), "CS", None)
       if cs is not None and getattr(getattr(cs, "CP", None), "carFingerprint", None) == "SUBARU_LEGACY_2025":
+        if not getattr(cs, "_last_lateral_mode_seeded", False):
+          cs.last_lateral_mode_centering = bool(self.params.get("LastLateralModeCentering", return_default=True))
+          cs._last_lateral_mode_seeded = True
+          if not getattr(cs, "_lka_button_seen", False):
+            cs._prev_lka_mode_settings = None
         if settings is not None:
           cs.aol_enabled = bool(settings.enabled)
+          cs.lka_enabled = bool(settings.lka_enabled)
         else:
           cs.aol_enabled = bool(self.params.get_bool("AlwaysOnLateral"))
+          cs.lka_enabled = bool(self.params.get("LaneKeepAssist", return_default=True))
       now = time.monotonic()
       if now >= next_cruise_read:
         self.slc_requested_configuration = self.read_slc_configuration()

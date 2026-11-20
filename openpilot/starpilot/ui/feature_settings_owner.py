@@ -116,13 +116,15 @@ BOOL_DEFAULTS = {
   AGGRESSIVE_COOLING_KEY: False,
   CURVE_MASTER_KEY: False, CURVE_NO_LEAD_KEY: False,
   "ShowCSCStatus": False,
-  "ForceAutoTuneOff": False, "AlwaysOnLateral": True, "NostalgiaMode": False,
+  "ForceAutoTuneOff": False, "AlwaysOnLateral": True, "LaneKeepAssist": False, "NostalgiaMode": False,
 }
 FLOAT_SPECS = {
   "ForceStopDistanceOffset": (-20, 20, 1, "ft"),
   "LaneCenterOffset": (-0.3, 0.3, 0.01, "m"),
   "LaneCenteringE2EAuthority": (0.0, 1.0, 0.05, "fraction"),
   "LaneCenteringStrength": (0.5, STRENGTH_MAX, 0.015, "fraction"),
+  "LaneKeepMinActivationSpeed": (15.0, 45.0, 1.0, "mph"),
+  "LaneKeepLineOffset": (-6.0, 6.0, 1.0, "in"),
   **{f"{name}{suffix}": (0.5, 3.0, 0.05, "s")
      for name in ("Aggressive", "Standard", "Relaxed") for suffix in ("Follow", "FollowHigh")},
   **{f"{name}{suffix}": (25.0, 200.0, 5.0, "%")
@@ -141,6 +143,7 @@ AOL_LEGACY_THRESHOLD = "PauseAOLOnBrake"
 TORQUE_NUMBERS = LEGACY_KEYS
 LANE_LIVE_KEYS = frozenset(("LaneCentering", "LaneCenteringPauseOnSignal", "LaneCenterOffset",
                             "LaneCenteringE2EAuthority", "LaneCenteringStrength"))
+LANE_KEEP_KEYS = frozenset(("LaneKeepAssist", "LaneKeepMinActivationSpeed", "LaneKeepLineOffset"))
 CURVE_KEYS = frozenset((CURVE_MASTER_KEY, CURVE_NO_LEAD_KEY))
 CURVE_PAGE_KEYS = CURVE_KEYS | {"ShowCSCStatus"}
 CRUISE_KEYS = frozenset(("CustomCruise", "CustomCruiseLong"))
@@ -209,6 +212,15 @@ class FeatureSettingsOwner:
   def longitudinal_available(self) -> bool:
     cp = self.vehicle_params()
     return bool(cp is not None and (cp.openpilotLongitudinalControl or self.configuration_longitudinal()))
+
+  def _lka_supported(self) -> bool:
+    cp = self.vehicle_params()
+    if cp is not None:
+      return (str(getattr(cp, "carFingerprint", "")) == "SUBARU_LEGACY_2025" and
+              not (bool(getattr(cp, "notCar", False)) or bool(getattr(cp, "passive", False)) or bool(getattr(cp, "dashcamOnly", False))))
+    from openpilot.starpilot.vehicle_selection import read_selection
+    selection = read_selection(self.params)
+    return bool(selection.readable and selection.valid and selection.platform == "SUBARU_LEGACY_2025")
 
   def aol_settings_policy(self, cp):
     if self.configuration_vehicle():
@@ -908,7 +920,7 @@ class FeatureSettingsOwner:
           self.gm_tune.capability() is not None or self.gm_truck.capability() is not None or
           self.gm_ev_preset.capability() is not None or self.volt_radar.capability() is not None or
           self.panda_wake.capability() is not None or FordRearFogFeature(self).capability() is not None or
-          preap_radar_capability(self.vehicle_params()) is not None):
+          preap_radar_capability(self.vehicle_params()) is not None or self._lka_supported()):
         rows.append(FeatureRow("", "Vehicle Settings", "Configure features supported by your vehicle", page=FeaturePage.VEHICLE, available=True))
       rows.append(FeatureRow("", "Driving Personalities", "Adjust Aggressive, Standard, Relaxed and Traffic profiles",
                              page=FeaturePage.PERSONALITIES, available=True))
@@ -1003,6 +1015,29 @@ class FeatureSettingsOwner:
         row = self._bool_row("SubaruRedneckCruise", "Software Cruise Control", parked and self.authority("parked_preferences"),
                              "Adjust stock cruise speed using Resume and Set. Applies after the next startup; factory ACC keeps pedal control.")
         rows.append(replace(row, available=row.available and self._readable("SubaruRedneckCruise"), capability=software_capability))
+      if self._lka_supported():
+        lka_allowed = ((configurable and (self.authority("preferences") or lateral_context)) or
+                       (not parked and (self.authority("preferences") or self.authority("lane_live"))))
+        lka_enabled, _, lka_valid = self._value("LaneKeepAssist")
+        rows.append(self._bool_row("LaneKeepAssist", "Lane Keep Assist", lka_allowed,
+                                   reason="Gently countersteers away from lane lines when drifting without active lane centering. 2025 Subaru Legacy only."))
+        lka_speed_row = self._number_row("LaneKeepMinActivationSpeed", "Minimum Activation Speed",
+                                         lka_allowed and lka_valid and lka_enabled == "1")
+        rows.append(replace(lka_speed_row,
+                            value=str(round(float(lka_speed_row.value))) if lka_speed_row.step > 0 else lka_speed_row.value,
+                            default_value=str(round(float(lka_speed_row.default_value))) if lka_speed_row.default_value is not None else None,
+                            minimum=15, maximum=45, step=1 if lka_speed_row.step > 0 else 0,
+                            default_reset_available=lka_allowed and parked and lka_speed_row.step > 0,
+                            reason="Speed floor above which Lane Keep Assist arms (includes a 4 mph hysteresis buffer). 2025 Subaru Legacy only."))
+        lka_offset_row = self._number_row("LaneKeepLineOffset", "Line Trigger Offset",
+                                          lka_allowed and lka_valid and lka_enabled == "1")
+        rows.append(replace(lka_offset_row,
+                            value=str(round(float(lka_offset_row.value))) if lka_offset_row.step > 0 else lka_offset_row.value,
+                            default_value=str(round(float(lka_offset_row.default_value))) if lka_offset_row.default_value is not None else None,
+                            minimum=-6, maximum=6, step=1 if lka_offset_row.step > 0 else 0,
+                            default_reset_available=lka_allowed and parked and lka_offset_row.step > 0,
+                            reason=("Shifts the lane-line trigger boundary inward (+) for earlier assist or " +
+                                    "outward (-) for later assist. 2025 Subaru Legacy only.")))
       sng_capability = self._gm_stop_capability("VoltSNG")
       if sng_capability is not None:
         row = self._bool_row("VoltSNG", "Volt Stop-and-Go Assistance", parked and self.authority("parked_preferences"),
@@ -1579,6 +1614,8 @@ class FeatureSettingsOwner:
                   key.endswith(("Follow", "FollowHigh")) or "Jerk" in key)
       if key in ("ShowSpeedLimits", "AlwaysAllowUploads", *SOURCE_PRIORITY_KEYS) or (key == "ForceStops" and request.value == "Off"):
         group = "preferences"
+      elif key in LANE_KEEP_KEYS:
+        group = "preferences" if self.authority("preferences") else "lane" if self.authority("lane") else "lane_live"
       elif key in LANE_LIVE_KEYS and not self.authority("lane"):
         group = "lane_live"
       else:
@@ -1588,6 +1625,7 @@ class FeatureSettingsOwner:
     try:
       profile_master_source = self._raw("CustomPersonalities") if source_key == PERSONALITY_PROFILES_PARAM else None
       if ((request.vehicle_fingerprint is not None if key in ("ShowSpeedLimits", "AlwaysAllowUploads") else
+           self.vehicle_fingerprint() != request.vehicle_fingerprint if key in LANE_KEEP_KEYS else
            not request.vehicle_fingerprint or self.vehicle_fingerprint() != request.vehicle_fingerprint) or
           not self.authority(group) or self._raw(source_key) != request.expected or
           not self._readable(source_key)):
@@ -1615,12 +1653,17 @@ class FeatureSettingsOwner:
           return False
       if key in SOURCE_PRIORITY_KEYS and request.capability != self._source_capability():
         return False
+      if key in LANE_KEEP_KEYS and not self._lka_supported():
+        return False
       if key in LANE_LIVE_KEYS:
         from openpilot.starpilot.lateral.lane_runtime import runtime_supported
         if not runtime_supported(self.vehicle_params()):
           return False
       if (key == "LaneCenteringPauseOnSignal" and self._value("LaneCentering")[0] != "1" and
           not (reset_default and request.value == ("On" if self._default(key) == "1" else "Off"))):
+        return False
+      if (key in ("LaneKeepMinActivationSpeed", "LaneKeepLineOffset") and self._value("LaneKeepAssist")[0] != "1" and
+          not (reset_default and float(request.value) == float(self._default(key)))):
         return False
       if key == "ForceStopDistanceOffset" and self._value("ForceStops")[0] != "1" and not (reset_default and float(request.value) == float(self._default(key))):
         return False
@@ -1747,13 +1790,15 @@ class FeatureSettingsOwner:
           number /= 100
         if not valid or not math.isfinite(float(current)) or not low <= float(current) <= high or not math.isfinite(number) or not low <= number <= high:
           return False
-        if key == "ForceStopDistanceOffset" and not number.is_integer():
+        if key in ("ForceStopDistanceOffset", "LaneKeepMinActivationSpeed", "LaneKeepLineOffset") and not number.is_integer():
           return False
         encoded = str(int(number)) if key == "ForceStopDistanceOffset" else str(round(number, 4))
       else:
         if request.value not in self._source_choices(key=key):
           return False
         encoded = "Map Data" if request.value == "Maps" else request.value
+      if key in LANE_KEEP_KEYS and not self._lka_supported():
+        return False
       if key in LANE_LIVE_KEYS:
         from openpilot.starpilot.lateral.lane_runtime import runtime_supported
         if not runtime_supported(self.vehicle_params()):

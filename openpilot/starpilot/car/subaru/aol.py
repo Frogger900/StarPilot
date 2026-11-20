@@ -28,6 +28,9 @@ class SubaruStockCardIntent(AolCardIntent):
     self._deferred_park_main = False
     self.main_arm_ns = 0
 
+  def _lateral_enabled(self) -> bool:
+    return bool(self.settings.enabled or (self.allow_manumatic and getattr(self.settings, 'lka_enabled', False)))
+
   def observe_startup_readiness(self, sm, CS, *, now_ns, **kwargs):
     if self.main_arm:
       stamp = int(sm.logMonoTime['onroadEvents'])
@@ -44,7 +47,7 @@ class SubaruStockCardIntent(AolCardIntent):
       if self.allow_manumatic else
       (structs.CarState.GearShifter.drive,)
     )
-    base_safe = (self.settings.enabled and CS.canValid and not CS.canTimeout and
+    base_safe = (self._lateral_enabled() and CS.canValid and not CS.canTimeout and
                  not self._calibration_inhibit and not self._calibration_rearm_required and
                  not CS.steerFaultPermanent and not CS.accFaulted and
                  not any(e.type == structs.CarState.ButtonEvent.Type.cancel and e.pressed for e in CS.buttonEvents))
