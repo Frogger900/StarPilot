@@ -346,8 +346,9 @@ class TransportPauseFeedback:
       axis.intentIntegrityEpoch != self.availability_epoch or
       not cs.canValid or cs.canTimeout or cs.steerFaultPermanent or cs.accFaulted or cs.doorOpen or
       cs.steeringDisengage or
-      cs.gearShifter not in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.sport,
-                            structs.CarState.GearShifter.low, structs.CarState.GearShifter.brake) or
+      (cs.gearShifter not in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.sport,
+                            structs.CarState.GearShifter.low, structs.CarState.GearShifter.brake) and
+       not (cp.carFingerprint == 'SUBARU_LEGACY_2025' and cs.gearShifter == structs.CarState.GearShifter.manumatic)) or
       not 0 < self.lateral_source_ns <= axis.sourceCarStateMonoTime <= stamp <= now_ns or
       now_ns - axis.sourceCarStateMonoTime > AXIS_MAX_AGE_NS or
       str(axis.faultReason) not in ('none', 'availabilityPause') or
@@ -498,7 +499,8 @@ class TransportPauseFeedback:
       or cp.brand == 'volkswagen' and volkswagen_qualified(cp, marked_only=True)) and users and
       not axis.desiredLongitudinal and not axis.longitudinalActive and
       (cs.cruiseState.available or classic_eps_recovery) and not cs.cruiseState.enabled and
-      cs.gearShifter in (gears.drive, gears.low, gears.sport, gears.brake) and
+      (cs.gearShifter in (gears.drive, gears.low, gears.sport, gears.brake) or
+       cp.carFingerprint == 'SUBARU_LEGACY_2025' and cs.gearShifter == gears.manumatic) and
       not cs.doorOpen and (not cs.seatbeltUnlatched or belt_eps_recovery) and not cs.brakePressed and not cs.regenBraking and
       (not cs.gasPressed or stock_angle or classic_eps_recovery or eps_recovery and stock_canfd_qualified(cp, marked_only=True)) and
       all((event.name == stock_user or classic_eps_recovery and not cs.cruiseState.available and
@@ -1121,7 +1123,8 @@ class TransportPauseFeedback:
     pending_stop = bool(ccnc_stop and axis.desiredLongitudinal and not axis.longitudinalActive and not axis.lateralActive)
     subaru_stop = cs.standstill and subaru_restriction(cp, cs)
     if (not (qualified(cp, marked_only=True) or mazda_qualified(cp, marked_only=True) or subaru_stop or ccnc_stop) or
-      cs.gearShifter != car.CarState.GearShifter.drive or
+      (cs.gearShifter != car.CarState.GearShifter.drive and
+       not (subaru_stop and cp.carFingerprint == 'SUBARU_LEGACY_2025' and cs.gearShifter == car.CarState.GearShifter.manumatic)) or
       not (temporary_restriction(cp, cs) or mazda_restriction(cp, cs) or subaru_stop) or cs.steerFaultTemporary or cs.steerFaultPermanent or
       not latched or self.failed or self.paused or self.pending_event or self.retention_started_ns or
       not (self.lateral_only_baseline or ccnc_stop) or not self.lateral_inventory or not self.lateral_baseline_ns or
@@ -1213,8 +1216,9 @@ class TransportPauseFeedback:
       not producer or previous[14] != producer or
       not 0 < previous[8] <= previous[2] <= self.healthy_feedback_ns <= now_ns or
       now_ns - previous[8] > SAFETY_MAX_AGE_NS or
-      cs.gearShifter not in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.low,
-                            structs.CarState.GearShifter.sport, structs.CarState.GearShifter.brake) or
+      (cs.gearShifter not in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.low,
+                            structs.CarState.GearShifter.sport, structs.CarState.GearShifter.brake) and
+       not (cp.carFingerprint == 'SUBARU_LEGACY_2025' and cs.gearShifter == structs.CarState.GearShifter.manumatic)) or
       not cs.canValid or cs.canTimeout or cs.steerFaultTemporary or cs.steerFaultPermanent or
       cs.accFaulted or cs.vehicleSensorsInvalid or cs.doorOpen or cs.seatbeltUnlatched or
       cs.steeringDisengage or not cs.cruiseState.available or cs.buttonEvents or
@@ -1574,6 +1578,7 @@ class TransportPauseFeedback:
         not cs.doorOpen and not cs.steeringDisengage and
         (cs.gearShifter in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.sport,
                            structs.CarState.GearShifter.low, structs.CarState.GearShifter.brake) or
+         cp.carFingerprint == 'SUBARU_LEGACY_2025' and cs.gearShifter == structs.CarState.GearShifter.manumatic or
          intent_paused and cs.gearShifter in (structs.CarState.GearShifter.reverse, structs.CarState.GearShifter.neutral)) and
         sm.seen['onroadEvents'] and sm.valid['onroadEvents'] and sm.alive['onroadEvents'] and
         0 < int(sm.logMonoTime['onroadEvents']) <= now_ns and

@@ -1922,6 +1922,9 @@ class Car:
         update_subaru_sng(self, CS, CC, now_nanos)
         from openpilot.starpilot.car.subaru.stop_start_caller import update as update_subaru_startup
         update_subaru_startup(self, now_nanos)
+        if (self.CP.carFingerprint == "SUBARU_LEGACY_2025" and CS.cruiseState.available and
+            getattr(self.CI.CS, "_lkas_mode_settle_frames", 0) == 0):
+          self.CI.CS.lateral_off = not bool(CC.hudControl.lanesVisible)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       self.publish_sendcan(can_sends, valid=CS.canValid)
       if learning_snapshot is not None and self.learning_send_committed_mono_ns:
@@ -1992,8 +1995,16 @@ class Car:
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
+      settings = None
       if self.aol_card_intent is not None:
-        self.aol_card_intent.settings = read_settings(self.params)
+        settings = read_settings(self.params)
+        self.aol_card_intent.settings = settings
+      cs = getattr(getattr(self, "CI", None), "CS", None)
+      if cs is not None and getattr(getattr(cs, "CP", None), "carFingerprint", None) == "SUBARU_LEGACY_2025":
+        if settings is not None:
+          cs.aol_enabled = bool(settings.enabled)
+        else:
+          cs.aol_enabled = bool(self.params.get_bool("AlwaysOnLateral"))
       now = time.monotonic()
       if now >= next_cruise_read:
         self.slc_requested_configuration = self.read_slc_configuration()

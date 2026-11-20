@@ -64,6 +64,7 @@
   "LeadInfo",
   "LongPitch",
   "LoudBlindspotAlert",
+  "LoudBlindspotAlertMuteAtStandstill",
   "LoudBlindspotAlertWhenDisengaged",
   "NostalgiaMode",
   "PIPPreviewEnabled",
