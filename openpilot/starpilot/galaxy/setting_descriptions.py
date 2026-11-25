@@ -45,6 +45,10 @@ DESCRIPTIONS = {
   'LaneCenterOffset': 'Moves the lane-centering target left or right of the detected lane center.',
   'LaneCenteringE2EAuthority': 'Lets a confident driving-model path reduce lane-centering correction when the model path differs from the lane center.',
   'LaneCenteringStrength': 'Sets the strength of lane-centering correction. 100% is normal; higher values strengthen it.',
+  'LaneKeepAssist': 'Gently countersteers away from detected lane lines when drifting without active lane centering. Supported Subaru angle-steering vehicles only.',
+  'LaneKeepLineOffset': ('Moves the Lane Keep Assist trigger boundary inward or outward from detected lane lines. ' +
+                         'Positive values assist earlier; negative values assist later. Supported Subaru angle-steering vehicles only.'),
+  'LaneKeepMinActivationSpeed': 'Sets the minimum speed at which Lane Keep Assist arms, with a 4 mph hysteresis buffer. Supported Subaru angle-steering vehicles only.',
   'PauseLateralSpeed': 'Pauses steering assistance below this speed. Zero disables the speed-based pause.',
   'PauseLateralOnSignal': 'Limits the low-speed steering pause to times when a turn signal is on.',
   'LateralResumeDelay': 'Waits before resuming steering after signaling ends, if speed fell below half the steering-pause threshold.',

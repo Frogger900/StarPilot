@@ -605,6 +605,170 @@ class LateralFeatureSettingsTests(unittest.TestCase):
     standard = self.owner.snapshot("torque", parked=True, system_long=True, lateral_context=True, metric=False)
     self.assertTrue(any(row.label == "Use StarPilot Auto Learn" for row in standard.rows))
 
+  def test_lane_keep_assist_and_min_speed_editable_before_drive_parked_and_onroad(self):
+    from openpilot.starpilot.vehicle_selection import encode as encode_vehicle_selection
+
+    lka_keys = ("LaneKeepAssist", "LaneKeepMinActivationSpeed", "LaneKeepLineOffset")
+    # Pre-drive / CP is None without Legacy 2025 selected: LKA stays hidden and disabled.
+    none_owner = FeatureSettingsOwner(self.params, lambda group: group == "preferences",
+                                      vehicle_fingerprint=lambda: "", vehicle_params=lambda: None)
+    hub_empty = none_owner.snapshot("hub", parked=True, system_long=True, lateral_context=True, metric=False)
+    self.assertFalse(any(row.page == "lka" for row in hub_empty.rows))
+    for hidden_page in ("lane", "vehicle", "lka"):
+      self.assertEqual([row.key for row in none_owner.snapshot(hidden_page, parked=True, system_long=True,
+                                                               lateral_context=True, metric=False).rows
+                        if row.key in lka_keys], [])
+
+    # With 2025 Subaru Legacy selected before drive (CP is None), hub links Lane Keep Assist and all three rows live on "lka".
+    Path(self.params.get_param_path("VehicleSelection")).write_bytes(encode_vehicle_selection("SUBARU_LEGACY_2025"))
+    hub_none = none_owner.snapshot("hub", parked=True, system_long=True, lateral_context=True, metric=False)
+    hub_lka = next(row for row in hub_none.rows if row.page == "lka")
+    self.assertEqual(hub_lka.label, "Lane Keep Assist")
+    self.assertTrue(hub_lka.available)
+    self.assertEqual([row.key for row in none_owner.snapshot("lane", parked=True, system_long=True, lateral_context=True, metric=False).rows
+                      if row.key in lka_keys], [])
+    self.assertEqual([row.key for row in none_owner.snapshot("vehicle", parked=True, system_long=True, lateral_context=True, metric=False).rows
+                      if row.key in lka_keys], [])
+    lka_none = none_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False)
+    self.assertEqual(lka_none.title, "Lane Keep Assist")
+    lka_row = next(row for row in lka_none.rows if row.key == "LaneKeepAssist")
+    speed_row = next(row for row in lka_none.rows if row.key == "LaneKeepMinActivationSpeed")
+    offset_row = next(row for row in lka_none.rows if row.key == "LaneKeepLineOffset")
+    self.assertIn("Supported Subaru angle-steering vehicles only.", lka_row.reason)
+    self.assertIn("Supported Subaru angle-steering vehicles only.", speed_row.reason)
+    self.assertIn("Supported Subaru angle-steering vehicles only.", offset_row.reason)
+    self.assertEqual(lka_row.value, "Off")
+    self.assertTrue(lka_row.available)
+    self.assertEqual(speed_row.value, "25")
+    self.assertEqual((speed_row.minimum, speed_row.maximum, speed_row.step, speed_row.unit), (15, 45, 1, "mph"))
+    self.assertFalse(speed_row.available)
+    self.assertEqual(offset_row.value, "0")
+    self.assertEqual((offset_row.minimum, offset_row.maximum, offset_row.step, offset_row.unit), (-6, 6, 1, "in"))
+    self.assertFalse(offset_row.available)
+    self.assertFalse(none_owner.apply(required_change(replace(speed_row, available=True), 1)))
+    self.assertFalse(none_owner.apply(required_change(replace(offset_row, available=True), 1)))
+
+    # Enabling LaneKeepAssist unlocks LaneKeepMinActivationSpeed and LaneKeepLineOffset and persists.
+    self.assertTrue(none_owner.apply(required_change(lka_row)))
+    lka_on = none_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False)
+    lka_on_row = next(row for row in lka_on.rows if row.key == "LaneKeepAssist")
+    speed_on_row = next(row for row in lka_on.rows if row.key == "LaneKeepMinActivationSpeed")
+    offset_on_row = next(row for row in lka_on.rows if row.key == "LaneKeepLineOffset")
+    self.assertEqual(lka_on_row.value, "On")
+    self.assertTrue(lka_on_row.available)
+    self.assertTrue(speed_on_row.available)
+    self.assertTrue(offset_on_row.available)
+
+    # Stepping min activation speed and line trigger offset persists and rejects invalid bounds / fractions.
+    self.assertTrue(none_owner.apply(required_change(speed_on_row, 1)))
+    self.assertEqual(
+      next(row for row in none_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False).rows
+           if row.key == "LaneKeepMinActivationSpeed").value,
+      "26",
+    )
+    self.assertTrue(none_owner.apply(required_change(offset_on_row, -1)))
+    self.assertEqual(
+      next(row for row in none_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False).rows
+           if row.key == "LaneKeepLineOffset").value,
+      "-1",
+    )
+    offset_after_neg = next(row for row in none_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False).rows
+                            if row.key == "LaneKeepLineOffset")
+    for invalid in ("7", "-7", "0.5"):
+      self.assertFalse(none_owner.apply(replace(required_change(offset_after_neg, 1), value=invalid)))
+
+    # Disabling LaneKeepAssist makes LaneKeepMinActivationSpeed and LaneKeepLineOffset unavailable and rejects edits.
+    self.assertTrue(none_owner.apply(required_change(lka_on_row)))
+    lka_off = none_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False)
+    lka_off_row = next(row for row in lka_off.rows if row.key == "LaneKeepAssist")
+    speed_off_row = next(row for row in lka_off.rows if row.key == "LaneKeepMinActivationSpeed")
+    offset_off_row = next(row for row in lka_off.rows if row.key == "LaneKeepLineOffset")
+    self.assertEqual(lka_off_row.value, "Off")
+    self.assertTrue(lka_off_row.available)
+    self.assertFalse(speed_off_row.available)
+    self.assertFalse(offset_off_row.available)
+    self.assertFalse(none_owner.apply(required_change(replace(speed_off_row, available=True), 1)))
+    self.assertFalse(none_owner.apply(required_change(replace(offset_off_row, available=True), 1)))
+
+    # Re-enable, then verify editable onroad for SUBARU_LEGACY_2025 under dedicated Lane Keep Assist page (not Lane Centering or Vehicle Settings).
+    self.assertTrue(none_owner.apply(required_change(lka_off_row)))
+    self.params.remove("VehicleSelection")
+    self.cp.carFingerprint = "SUBARU_LEGACY_2025"
+    onroad_owner = FeatureSettingsOwner(self.params, lambda group: group == "preferences",
+                                        vehicle_fingerprint=lambda: str(self.cp.carFingerprint),
+                                        vehicle_params=lambda: self.cp)
+    self.assertTrue(any(row.page == "lka" and row.label == "Lane Keep Assist" and row.available
+                        for row in onroad_owner.snapshot("hub", parked=False, system_long=True, lateral_context=True, metric=False).rows))
+    self.assertEqual([row.key for row in onroad_owner.snapshot("lane", parked=False, system_long=True, lateral_context=True, metric=False).rows
+                      if row.key in lka_keys], [])
+    self.assertEqual([row.key for row in onroad_owner.snapshot("vehicle", parked=False, system_long=True, lateral_context=True, metric=False).rows
+                      if row.key in lka_keys], [])
+    lka_onroad = onroad_owner.snapshot("lka", parked=False, system_long=True, lateral_context=True, metric=False)
+    onroad_lka = next(row for row in lka_onroad.rows if row.key == "LaneKeepAssist")
+    onroad_speed = next(row for row in lka_onroad.rows if row.key == "LaneKeepMinActivationSpeed")
+    onroad_offset = next(row for row in lka_onroad.rows if row.key == "LaneKeepLineOffset")
+    self.assertIn("Supported Subaru angle-steering vehicles only.", onroad_lka.reason)
+    self.assertIn("Supported Subaru angle-steering vehicles only.", onroad_speed.reason)
+    self.assertIn("Supported Subaru angle-steering vehicles only.", onroad_offset.reason)
+    self.assertTrue(onroad_lka.available)
+    self.assertTrue(onroad_speed.available)
+    self.assertTrue(onroad_offset.available)
+    self.assertTrue(onroad_owner.apply(required_change(onroad_speed, -1)))
+    self.assertTrue(onroad_owner.apply(required_change(onroad_offset, 1)))
+    self.assertTrue(onroad_owner.apply(required_change(onroad_lka)))
+
+  def test_lane_keep_assist_unavailable_for_other_vehicles_and_non_driving_car_params(self):
+    lka_keys = ("LaneKeepAssist", "LaneKeepMinActivationSpeed", "LaneKeepLineOffset")
+    self.cp.carFingerprint = "SUBARU_LEGACY_2025"
+    self.params.put_bool("LaneKeepAssist", True, block=True)
+    legacy_owner = FeatureSettingsOwner(self.params, lambda group: True,
+                                        vehicle_fingerprint=lambda: str(self.cp.carFingerprint),
+                                        vehicle_params=lambda: self.cp)
+    legacy_lka = legacy_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False)
+    forged_lka = required_change(next(row for row in legacy_lka.rows if row.key == "LaneKeepAssist"))
+    forged_speed = required_change(next(row for row in legacy_lka.rows if row.key == "LaneKeepMinActivationSpeed"), 1)
+    forged_offset = required_change(next(row for row in legacy_lka.rows if row.key == "LaneKeepLineOffset"), 1)
+
+    for field in ("passive", "notCar", "dashcamOnly"):
+      setattr(self.cp, field, True)
+      try:
+        self.assertFalse(any(row.page == "lka" for row in
+                             legacy_owner.snapshot("hub", parked=True, system_long=True, lateral_context=True, metric=False).rows), field)
+        for page in ("vehicle", "lane", "lka"):
+          rows = legacy_owner.snapshot(page, parked=True, system_long=True, lateral_context=True, metric=False).rows
+          self.assertEqual([row.key for row in rows if row.key in lka_keys], [], (field, page))
+        self.assertEqual(legacy_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False).rows, (), field)
+        self.assertFalse(legacy_owner.apply(forged_lka), field)
+        self.assertFalse(legacy_owner.apply(forged_speed), field)
+        self.assertFalse(legacy_owner.apply(forged_offset), field)
+      finally:
+        setattr(self.cp, field, False)
+
+    for other_fp in ("TOYOTA_COROLLA_TSS2", "SUBARU_OUTBACK_2023", "SUBARU_CROSSTREK_2025", "SUBARU_IMPREZA_2025"):
+      self.cp.carFingerprint = other_fp
+      self.assertFalse(any(row.page == "lka" for row in
+                           legacy_owner.snapshot("hub", parked=True, system_long=True, lateral_context=True, metric=False).rows), other_fp)
+      for page in ("vehicle", "lane", "lka"):
+        rows = legacy_owner.snapshot(page, parked=True, system_long=True, lateral_context=True, metric=False).rows
+        self.assertEqual([row.key for row in rows if row.key in lka_keys], [], (other_fp, page))
+      self.assertEqual(legacy_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False).rows, (), other_fp)
+      self.assertFalse(legacy_owner.apply(replace(forged_lka, vehicle_fingerprint=other_fp)), other_fp)
+      self.assertFalse(legacy_owner.apply(replace(forged_speed, vehicle_fingerprint=other_fp)), other_fp)
+      self.assertFalse(legacy_owner.apply(replace(forged_offset, vehicle_fingerprint=other_fp)), other_fp)
+
+    none_owner = FeatureSettingsOwner(self.params, lambda group: True,
+                                      vehicle_fingerprint=lambda: None,
+                                      vehicle_params=lambda: None)
+    self.assertFalse(any(row.page == "lka" for row in
+                         none_owner.snapshot("hub", parked=True, system_long=True, lateral_context=True, metric=False).rows))
+    for page in ("vehicle", "lane", "lka"):
+      rows = none_owner.snapshot(page, parked=True, system_long=True, lateral_context=True, metric=False).rows
+      self.assertEqual([row.key for row in rows if row.key in lka_keys], [], ("none", page))
+    self.assertEqual(none_owner.snapshot("lka", parked=True, system_long=True, lateral_context=True, metric=False).rows, ())
+    self.assertFalse(none_owner.apply(replace(forged_lka, vehicle_fingerprint=None)))
+    self.assertFalse(none_owner.apply(replace(forged_speed, vehicle_fingerprint=None)))
+    self.assertFalse(none_owner.apply(replace(forged_offset, vehicle_fingerprint=None)))
+
 
 if __name__ == "__main__":
   unittest.main()

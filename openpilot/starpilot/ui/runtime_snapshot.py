@@ -41,6 +41,7 @@ from openpilot.cereal.services import SERVICE_LIST
 from openpilot.tools.replay.display_clock import BOOT_TIME_SERVICES
 from opendbc.car.gm.values import bolt_pedal_in_drive_requires_low
 from opendbc.car.structs import car as car_schema
+from opendbc.car.subaru.values import SUBARU_LKA_CARS
 from openpilot.starpilot.ui.device_state import DeviceRequest, DeviceState
 from openpilot.starpilot.ui.home_state import DriveStatsData, HomeMode, HomeState
 from openpilot.starpilot.models.jetlink_status import JetlinkStatusFeed
@@ -693,11 +694,11 @@ class RuntimeSnapshotAdapter:
       display_message(sm, "carOutput", now_ns, after_frame=after) if started else None,
       display_message(sm, "vehicleParameters", now_ns, after_frame=after) if started else None, cp,
     )
-    legacy_2025_lateral_off = bool(
-      cp is not None and getattr(cp, 'carFingerprint', '') == 'SUBARU_LEGACY_2025' and
+    subaru_lka_or_off = bool(
+      cp is not None and getattr(cp, 'carFingerprint', '') in SUBARU_LKA_CARS and
       display_control is not None and not getattr(getattr(display_control, 'hudControl', None), 'lanesVisible', True)
     )
-    display_lat_active = bool(display_control.latActive) if (display_control is not None and not legacy_2025_lateral_off) else False
+    display_lat_active = bool(display_control.latActive) if (display_control is not None and not subaru_lka_or_off) else False
     bolt_needs_low = display_car_valid and bolt_pedal_in_drive_requires_low(cp, getattr(display_car, 'gearShifter', None))
     display_long_active = bool(display_control is not None and display_control.longActive and not bolt_needs_low)
     long_engaged = bool(display_selfdrive is not None and getattr(display_selfdrive, 'enabled', False) and not bolt_needs_low)
@@ -753,7 +754,7 @@ class RuntimeSnapshotAdapter:
           weather_location = (fix[1].latitude, fix[1].longitude)
           break
     aol_latched = (display_aol_latch(sm, now_ns, after_frame=after)
-                   if started and getattr(ui, "aol_runtime", False) and not legacy_2025_lateral_off else None)
+                   if started and getattr(ui, "aol_runtime", False) and not subaru_lka_or_off else None)
     perception = self._conditional_perception.project(
       curve_envelope, now_ns=now_ns, event_ns=int(sm.logMonoTime['slcState']) if curve_envelope is not None else 0,
       drive_id=drive_id, choice=self._conditional_choice,

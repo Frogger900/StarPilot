@@ -7,7 +7,7 @@ from opendbc.car.subaru.carcontroller import CarController
 from opendbc.car.subaru.carstate import CarState
 from opendbc.car.subaru.interface import CarInterface
 from opendbc.car.subaru.tests.test_ascent_angle import setup_controller, step
-from opendbc.car.subaru.values import CAR, CanBus, DBC
+from opendbc.car.subaru.values import CAR, CanBus, DBC, FROGGER_ANGLE_SIBLINGS, SUBARU_LKA_CARS
 from opendbc.safety.tests import test_subaru_gen2_angle_pair as pair
 
 
@@ -21,61 +21,158 @@ def _step_to_hud(controller, command, state):
   return parser.vl['ES_LKAS_State']
 
 
-class TestLegacy2025Aol(unittest.TestCase):
-  def test_lkas_dash_state_toggle_emits_button_event_and_toggles_aol(self):
+class TestSubaruLka(unittest.TestCase):
+  def test_frogger_angle_siblings_stay_excluded_from_subaru_lka_cars(self):
+    self.assertEqual(SUBARU_LKA_CARS, frozenset((CAR.SUBARU_LEGACY_2025,)))
+    for sibling in FROGGER_ANGLE_SIBLINGS:
+      self.assertNotIn(sibling, SUBARU_LKA_CARS)
+      _, controller, command, state = setup_controller(sibling)
+      state.lka_enabled = True
+      state.lka_armed = True
+      command.latActive = True
+      _, decoded = step(controller, command, state)
+      self.assertEqual(decoded['SET_3'], 3, sibling)
+  def test_lkas_dash_state_toggle_emits_button_event_and_arms_lka(self):
     cp = CarInterface.get_params(CAR.SUBARU_LEGACY_2025, {0: {}, 1: {}, 2: {}}, [], False, False, False)
     _, frames = pair.TestSubaruGen2AnglePair.sources(CAR.SUBARU_LEGACY_2025)
     packer = CANPacker(DBC[CAR.SUBARU_LEGACY_2025][Bus.pt])
     state = CarState(cp)
-    self.assertTrue(state.aol_enabled)
+    self.assertFalse(state.lka_enabled)
+    state.lka_enabled = True
     parsers = state.get_can_parsers(cp)
     state.update(parsers)
     for parser in parsers.values():
       parser.update([(1_000_000_000, frames)])
     ret = state.update(parsers)
     self.assertTrue(ret.cruiseState.available)
-    self.assertFalse(state.lateral_off)
+    self.assertFalse(state.lka_armed)
     self.assertEqual(len(ret.buttonEvents), 0)
 
-    # Flip LKAS_Dash_State (0 -> 1) on bus 2: toggles AOL off once and holds Type.lkas press/release for 5 frames.
+    # Flip LKAS_Dash_State (0 -> 1) on bus 2: arms LKA once and holds Type.lkas press/release for 5 frames.
     lkas_on = packer.make_can_msg('ES_LKAS_State', CanBus.camera, {'LKAS_Dash_State': 1})
     parsers[Bus.cam].update([(1_020_000_000, [lkas_on])])
     ret = state.update(parsers)
-    self.assertTrue(state.lateral_off)
+    self.assertTrue(state.lka_armed)
     lkas_events = [be for be in ret.buttonEvents if be.type == structs.CarState.ButtonEvent.Type.lkas]
     self.assertEqual([be.pressed for be in lkas_events], [True, False])
     for idx in range(4):
       ret = state.update(parsers)
-      self.assertTrue(state.lateral_off)
+      self.assertTrue(state.lka_armed)
       lkas_events = [be for be in ret.buttonEvents if be.type == structs.CarState.ButtonEvent.Type.lkas]
       self.assertEqual([be.pressed for be in lkas_events], [True, False], f"hold frame {idx + 2}")
     ret = state.update(parsers)
-    self.assertTrue(state.lateral_off)
+    self.assertTrue(state.lka_armed)
     self.assertEqual([be for be in ret.buttonEvents if be.type == structs.CarState.ButtonEvent.Type.lkas], [])
 
-    # Flip LKAS_Dash_State (1 -> 0): restores AOL active cleanly.
+    # Flip LKAS_Dash_State (1 -> 0): disarms LKA cleanly.
     lkas_off = packer.make_can_msg('ES_LKAS_State', CanBus.camera, {'LKAS_Dash_State': 0})
     parsers[Bus.cam].update([(1_040_000_000, [lkas_off])])
     ret = state.update(parsers)
-    self.assertFalse(state.lateral_off)
+    self.assertFalse(state.lka_armed)
 
-    # Toggle off, then drop Cruise_On -> lateral_off resets to False when AOL is enabled.
+    # Re-arm, then drop Cruise_On -> lka_armed resets to False.
     parsers[Bus.cam].update([(1_060_000_000, [lkas_on])])
     state.update(parsers)
-    self.assertTrue(state.lateral_off)
+    self.assertTrue(state.lka_armed)
     dash_off = packer.make_can_msg('ES_DashStatus', CanBus.camera, {'Cruise_On': 0})
     parsers[Bus.cam].update([(1_080_000_000, [dash_off])])
     state.update(parsers)
-    self.assertFalse(state.lateral_off)
+    self.assertFalse(state.lka_armed)
 
-  def test_aol_mode_transitions_and_lkas_button_behavior(self):
+  def test_carcontroller_lka_standby_and_nudge_hud_and_override(self):
+    _, controller, command, state = setup_controller(CAR.SUBARU_LEGACY_2025)
+    state.lka_armed = True
+    command.enabled = False
+    command.latActive = False
+    command.hudControl.leftLaneVisible = True
+    command.hudControl.rightLaneVisible = False
+    state.out.steeringAngleDeg = 0.0
+    state.out.steeringRateDeg = 0.0
+    state.out.steeringTorque = 0.0
+
+    # Standby: no steering torque/angle request, white wheel icon (1), immediate left line visibility (1).
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 0)
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Dash_State'], 1)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
+    self.assertEqual(hud['LKAS_Right_Line_Visible'], 0)
+
+    # Cornering gate (< 20 deg keeps lines; >= 20 deg blanks standby lines) and blinker gate blank standby lines immediately in LKA mode.
+    state.out.steeringAngleDeg = 19.0
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
+    state.out.steeringAngleDeg = 20.0
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 0)
+    state.out.steeringAngleDeg = 0.0
+    state.out.leftBlinker = True
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 0)
+    state.out.leftBlinker = False
+
+    # Active nudge: angle requested with SET_3=2 and smooth 0 deg/s onset ramp, wheel icon white (1), left line amber (3).
+    command.latActive = True
+    command.hudControl.leftLaneDepart = True
+    command.actuators.steeringAngleDeg = -8.0
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+    self.assertEqual(decoded['SET_3'], 2)
+    self.assertLess(decoded['LKAS_Output'], 0.0)
+    self.assertGreater(decoded['LKAS_Output'], -0.05)  # 0.05 ramp on first step avoids sudden onset jerk
+    for _ in range(25):
+      _, decoded = step(controller, command, state)
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Dash_State'], 1)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 3)
+
+    # Opposing driver torque <= 175 stays active; > 175 overrides LKA nudge, then clears handoff and re-engages below 110 at <= 25 deg/s.
+    state.out.steeringTorque = 150.0
+    step(controller, command, state)
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+    state.out.steeringTorque = 180.0
+    step(controller, command, state)
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 0)
+    state.out.steeringTorque = 105.0
+    state.out.steeringRateDeg = 20.0
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 0)
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+
+    # Engaging EyeSight ACC (enabled=True) while in LKA mode must stay in LKA mode.
+    command.enabled = True
+    state.out.cruiseState.enabled = True
+    command.latActive = False
+    command.hudControl.leftLaneDepart = False
+    state.out.steeringTorque = 0.0
+    state.out.steeringRateDeg = 0.0
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 0)
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Dash_State'], 1)
+
+    command.latActive = True
+    command.hudControl.leftLaneDepart = True
+    command.actuators.steeringAngleDeg = -8.0
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Dash_State'], 1)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 3)
+
+  def test_four_aol_lka_mode_combinations_and_lkas_button_transitions(self):
     cp = CarInterface.get_params(CAR.SUBARU_LEGACY_2025, {0: {}, 1: {}, 2: {}}, [], False, False, False)
     _, frames = pair.TestSubaruGen2AnglePair.sources(CAR.SUBARU_LEGACY_2025)
     packer = CANPacker(DBC[CAR.SUBARU_LEGACY_2025][Bus.pt])
 
-    def init_state(aol_enabled: bool):
+    def init_state(aol_enabled: bool, lka_enabled: bool, last_centering: bool = True):
       state = CarState(cp)
       state.aol_enabled = aol_enabled
+      state.lka_enabled = lka_enabled
+      state.last_lateral_mode_centering = last_centering
       parsers = state.get_can_parsers(cp)
       state.update(parsers)
       for parser in parsers.values():
@@ -88,28 +185,64 @@ class TestLegacy2025Aol(unittest.TestCase):
       parsers[Bus.cam].update([(ts_ns, [msg])])
       return state.update(parsers)
 
-    # 1. AOL ON: AOL Active <-> AOL Off.
-    state, parsers = init_state(True)
+    # 1. Both AOL + LKA ON: Centering <-> LKA, persisting last_lateral_mode_centering.
+    state, parsers = init_state(True, True, last_centering=True)
+    self.assertFalse(state.lka_armed)
     self.assertFalse(state.lateral_off)
     press_lkas(state, parsers, 1_020_000_000, 1)
+    self.assertTrue(state.lka_armed)
+    self.assertFalse(state.lateral_off)
+    self.assertFalse(state.last_lateral_mode_centering)
+    press_lkas(state, parsers, 1_040_000_000, 0)
+    self.assertFalse(state.lka_armed)
+    self.assertFalse(state.lateral_off)
+    self.assertTrue(state.last_lateral_mode_centering)
+
+    state_lka_boot, _ = init_state(True, True, last_centering=False)
+    self.assertTrue(state_lka_boot.lka_armed)
+    self.assertFalse(state_lka_boot.lateral_off)
+
+    # 2. Only AOL ON: AOL <-> All Off.
+    state, parsers = init_state(True, False)
+    self.assertFalse(state.lka_armed)
+    self.assertFalse(state.lateral_off)
+    press_lkas(state, parsers, 1_020_000_000, 1)
+    self.assertFalse(state.lka_armed)
     self.assertTrue(state.lateral_off)
     press_lkas(state, parsers, 1_040_000_000, 0)
+    self.assertFalse(state.lka_armed)
     self.assertFalse(state.lateral_off)
 
-    # 2. AOL OFF: forced Off even after LKAS presses.
-    state, parsers = init_state(False)
+    # 3. Only LKA ON: LKA <-> All Off.
+    state, parsers = init_state(False, True)
+    self.assertTrue(state.lka_armed)
+    self.assertFalse(state.lateral_off)
+    press_lkas(state, parsers, 1_020_000_000, 1)
+    self.assertFalse(state.lka_armed)
+    self.assertTrue(state.lateral_off)
+    press_lkas(state, parsers, 1_040_000_000, 0)
+    self.assertTrue(state.lka_armed)
+    self.assertFalse(state.lateral_off)
+
+    # 4. Both OFF: forced All Off even after LKAS presses.
+    state, parsers = init_state(False, False)
+    self.assertFalse(state.lka_armed)
     self.assertTrue(state.lateral_off)
     press_lkas(state, parsers, 1_020_000_000, 1)
+    self.assertFalse(state.lka_armed)
     self.assertTrue(state.lateral_off)
 
-    # 3. Dynamic transitions across AOL settings changes.
-    state, parsers = init_state(True)
+    # Dynamic transition across settings changes.
+    state, parsers = init_state(True, True, last_centering=False)
+    self.assertTrue(state.lka_armed)
+    state.lka_enabled = False
+    state.update(parsers)
+    self.assertFalse(state.lka_armed)
     self.assertFalse(state.lateral_off)
     state.aol_enabled = False
+    state.lka_enabled = True
     state.update(parsers)
-    self.assertTrue(state.lateral_off)
-    state.aol_enabled = True
-    state.update(parsers)
+    self.assertTrue(state.lka_armed)
     self.assertFalse(state.lateral_off)
 
   def test_carcontroller_dash_state_and_steering_across_lateral_modes(self):
@@ -119,56 +252,42 @@ class TestLegacy2025Aol(unittest.TestCase):
     state.out.vEgo = 20.0
     state.out.standstill = False
 
-    # AOL active -> LKAS_Dash_State == 2, lines visible, and ES_LKAS_ANGLE LKAS_Request == 1.
-    state.aol_enabled = True
+    # Centering active -> LKAS_Dash_State == 2 and ES_LKAS_ANGLE LKAS_Request == 1.
+    state.lka_armed = False
     state.lateral_off = False
     command.enabled = True
     command.latActive = True
-    command.hudControl.lanesVisible = True
-    command.hudControl.leftLaneVisible = True
-    command.hudControl.rightLaneVisible = True
     command.actuators.steeringAngleDeg = 10.0
     _, angle = step(controller, command, state)
     self.assertEqual(angle['LKAS_Request'], 1)
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 2)
-    self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
-    self.assertEqual(hud['LKAS_Right_Line_Visible'], 1)
 
-    # lateral_off with AOL toggle ON -> LKAS_Dash_State == 1 (white ready wheel), NO lines, and LKAS_Request == 0.
+    # LKA armed (no active nudge) -> LKAS_Dash_State == 1.
+    state.lka_armed = True
+    state.lateral_off = False
+    command.enabled = False
+    command.latActive = False
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Dash_State'], 1)
+
+    # lateral_off with at least one toggle ON -> LKAS_Dash_State == 1 (white ready wheel) and LKAS_Request == 0.
+    state.lka_armed = False
     state.lateral_off = True
     state.aol_enabled = True
-    command.hudControl.lanesVisible = False
+    state.lka_enabled = False
+    command.enabled = True
+    command.latActive = True
     _, angle = step(controller, command, state)
     self.assertEqual(angle['LKAS_Request'], 0)
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 1)
-    self.assertEqual(hud['LKAS_Left_Line_Visible'], 0)
-    self.assertEqual(hud['LKAS_Right_Line_Visible'], 0)
 
-    # AOL toggle OFF while not engaged -> LKAS_Dash_State == 0 (wheel off) and NO lines (even before lateral_off syncs).
+    # Both AOL and LKA toggles OFF -> LKAS_Dash_State == 0 (wheel icon off).
     state.aol_enabled = False
-    state.lateral_off = False
-    command.enabled = False
-    command.latActive = False
-    command.hudControl.lanesVisible = False
-    _, angle = step(controller, command, state)
-    self.assertEqual(angle['LKAS_Request'], 0)
+    state.lka_enabled = False
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 0)
-    self.assertEqual(hud['LKAS_Left_Line_Visible'], 0)
-    self.assertEqual(hud['LKAS_Right_Line_Visible'], 0)
-
-    # AOL toggle OFF with ACC engaged (even when state.lateral_off is still True) -> steers + green wheel + lines.
-    state.lateral_off = True
-    command.enabled = True
-    command.latActive = True
-    command.hudControl.lanesVisible = True
-    _, angle = step(controller, command, state)
-    self.assertEqual(angle['LKAS_Request'], 1)
-    hud = _step_to_hud(controller, command, state)
-    self.assertEqual(hud['LKAS_Dash_State'], 2)
-    self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
 
     # Main cruise OFF -> LKAS_Dash_State == 0 (wheel icon off) even with AOL toggle ON.
     state.aol_enabled = True
@@ -181,18 +300,20 @@ class TestLegacy2025Aol(unittest.TestCase):
     _, frames = pair.TestSubaruGen2AnglePair.sources(CAR.SUBARU_LEGACY_2025)
     packer = CANPacker(DBC[CAR.SUBARU_LEGACY_2025][Bus.pt])
     state.aol_enabled = True
+    state.lka_enabled = True
+    state.last_lateral_mode_centering = True
     parsers = state.get_can_parsers(cp)
     state.update(parsers)
     for parser in parsers.values():
       parser.update([(1_000_000_000, frames)])
     state.update(parsers)
-    self.assertFalse(state.lateral_off)
+    self.assertFalse(state.lka_armed)
 
-    controlsd_lateral_off = False
+    controlsd_lka_armed = False
     prev_lkas_pressed = False
 
     def step_controlsd_from_ret(car_state):
-      nonlocal controlsd_lateral_off, prev_lkas_pressed
+      nonlocal controlsd_lka_armed, prev_lkas_pressed
       raw_pressed = any(
         be.type == structs.CarState.ButtonEvent.Type.lkas and be.pressed
         for be in car_state.buttonEvents
@@ -202,66 +323,68 @@ class TestLegacy2025Aol(unittest.TestCase):
       lkas_pressed = raw_pressed and not prev_lkas_pressed
       prev_lkas_pressed = raw_pressed
       if lkas_pressed:
-        controlsd_lateral_off = not controlsd_lateral_off
+        controlsd_lka_armed = not controlsd_lka_armed
 
     # 1. Press LKAS (0 -> 1): simulate SubMaster dropping the first two carState frames.
     parsers[Bus.cam].update([(1_020_000_000, [packer.make_can_msg('ES_LKAS_State', CanBus.camera, {'LKAS_Dash_State': 1})])])
     cs_frames = [state.update(parsers) for _ in range(6)]
     self.assertEqual([any(be.type == structs.CarState.ButtonEvent.Type.lkas for be in f.buttonEvents) for f in cs_frames],
                      [True, True, True, True, True, False])
-    self.assertTrue(state.lateral_off)
+    self.assertTrue(state.lka_armed)
+    # Conflated consumer wakes on frame index 2 (dropping frames 0 and 1), then sees frames 3..5.
     for f in cs_frames[2:]:
       step_controlsd_from_ret(f)
-    self.assertTrue(controlsd_lateral_off)
-    self.assertEqual(state.lateral_off, controlsd_lateral_off)
+    self.assertTrue(controlsd_lka_armed)
+    self.assertEqual(state.lka_armed, controlsd_lka_armed)
 
-    # With AOL toggled off, wheel icon must stay white (1) with no lane lines and no steering request.
+    # During an active LKA nudge, wheel icon must remain white (1).
     state.out.cruiseState.available = True
     state.out.gearShifter = structs.CarState.GearShifter.drive
     state.out.vEgo = 20.0
     state.out.standstill = False
     command.enabled = False
     command.latActive = True
-    command.hudControl.lanesVisible = False
-    command.hudControl.leftLaneVisible = True
+    command.hudControl.leftLaneDepart = True
     command.actuators.steeringAngleDeg = -8.0
     _, decoded = step(controller, command, state)
-    self.assertEqual(decoded['LKAS_Request'], 0)
+    self.assertEqual(decoded['LKAS_Request'], 1)
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 1)
-    self.assertEqual(hud['LKAS_Left_Line_Visible'], 0)
 
     # 2. Press LKAS (1 -> 0) back to AOL: again drop first two carState frames via conflation.
     parsers[Bus.cam].update([(1_100_000_000, [packer.make_can_msg('ES_LKAS_State', CanBus.camera, {'LKAS_Dash_State': 0})])])
     cs_frames_2 = [state.update(parsers) for _ in range(6)]
     self.assertEqual([any(be.type == structs.CarState.ButtonEvent.Type.lkas for be in f.buttonEvents) for f in cs_frames_2],
                      [True, True, True, True, True, False])
-    self.assertFalse(state.lateral_off)
+    self.assertFalse(state.lka_armed)
     for f in cs_frames_2[2:]:
       step_controlsd_from_ret(f)
-    self.assertFalse(controlsd_lateral_off)
-    self.assertEqual(state.lateral_off, controlsd_lateral_off)
+    self.assertFalse(controlsd_lka_armed)
+    self.assertEqual(state.lka_armed, controlsd_lka_armed)
 
-    # In AOL mode with active steering, wheel icon turns back to green (2) and lines reappear.
+    # In AOL mode with active steering, wheel icon turns back to green (2).
     command.enabled = True
     command.latActive = True
     command.hudControl.lanesVisible = True
+    command.hudControl.leftLaneDepart = False
     command.actuators.steeringAngleDeg = 8.0
     _, decoded = step(controller, command, state)
     self.assertEqual(decoded['LKAS_Request'], 1)
+    self.assertEqual(decoded['SET_3'], 3)
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 2)
-    self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
 
-  def test_carcontroller_aol_green_wheel_park_override_and_alerts(self):
+  def test_carcontroller_aol_green_wheel_in_park_and_steer_required_chime(self):
     _, controller, command, state = setup_controller(CAR.SUBARU_LEGACY_2025)
     state.out.cruiseState.available = True
     state.out.gearShifter = structs.CarState.GearShifter.park
     state.out.vEgo = 0.0
     state.out.standstill = True
     state.aol_enabled = True
+    state.lka_enabled = True
 
     # AOL active in Park / standstill (latActive=False, lanesVisible=True) -> green wheel icon (2).
+    state.lka_armed = False
     state.lateral_off = False
     command.enabled = False
     command.latActive = False
@@ -269,24 +392,55 @@ class TestLegacy2025Aol(unittest.TestCase):
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 2)
 
-    # Toggle LKAS off in Park -> immediately drops to white wheel icon (1).
-    state.lateral_off = True
+    # Toggle LKAS to LKA mode in Park -> immediately drops to white wheel icon (1).
+    state.lka_armed = True
     command.hudControl.lanesVisible = False
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 1)
 
-    # steerRequired visual alert maps to Keep Hands On Wheel message (1) cleanly on 0x322.
+    # LKA hands-on-wheel stages on 0x322: 5s (visual only: 1/0), 10s (+bouncy chime: 1/28), 15s lockout (7/30).
     command.hudControl.visualAlert = structs.CarControl.HUDControl.VisualAlert.steerRequired
     command.hudControl.audibleAlert = structs.CarControl.HUDControl.AudibleAlert.none
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Alert_Msg'], 1)
     self.assertEqual(hud['LKAS_Alert'], 0)
+
+    command.hudControl.audibleAlert = structs.CarControl.HUDControl.AudibleAlert.warningSoft
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Alert_Msg'], 7)
+    self.assertEqual(hud['LKAS_Alert'], 28)
+    # 10s chime pulses off cleanly at 1.4s..1.99s while keeping flashing red hands active, then re-triggers at 2.0s.
+    while controller.lka_chime_pulse_ticks < 145:
+      hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Alert_Msg'], 7)
+    self.assertEqual(hud['LKAS_Alert'], 0)
+    while controller.lka_chime_pulse_ticks < 205:
+      hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Alert_Msg'], 7)
+    self.assertEqual(hud['LKAS_Alert'], 28)
+
+    command.hudControl.audibleAlert = structs.CarControl.HUDControl.AudibleAlert.warningImmediate
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Alert_Msg'], 7)
+    self.assertEqual(hud['LKAS_Alert'], 30)
+    # 15s lockout chime pulses off cleanly at 2.2s..2.99s while keeping escalated border/message active, then re-triggers at 3.0s.
+    while controller.lka_chime_pulse_ticks < 225:
+      hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Alert_Msg'], 7)
+    self.assertEqual(hud['LKAS_Alert'], 0)
+    while controller.lka_chime_pulse_ticks < 305:
+      hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Alert_Msg'], 7)
+    self.assertEqual(hud['LKAS_Alert'], 30)
+
     command.hudControl.visualAlert = structs.CarControl.HUDControl.VisualAlert.none
+    command.hudControl.audibleAlert = structs.CarControl.HUDControl.AudibleAlert.none
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Alert_Msg'], 0)
     self.assertEqual(hud['LKAS_Alert'], 0)
 
     # Driving in AOL / full OP: active steering -> green (2), manual override -> white (1), resume -> green (2).
+    state.lka_armed = False
     state.lateral_off = False
     state.out.gearShifter = structs.CarState.GearShifter.drive
     state.out.vEgo = 20.0
@@ -300,6 +454,7 @@ class TestLegacy2025Aol(unittest.TestCase):
     state.out.steeringPressed = False
     _, decoded = step(controller, command, state)
     self.assertEqual(decoded['LKAS_Request'], 1)
+    self.assertEqual(decoded['SET_3'], 3)
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 2)
 
@@ -320,10 +475,11 @@ class TestLegacy2025Aol(unittest.TestCase):
     step(controller, command, state)
     _, decoded = step(controller, command, state)
     self.assertEqual(decoded['LKAS_Request'], 1)
+    self.assertEqual(decoded['SET_3'], 3)
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Dash_State'], 2)
 
-    # Stock EyeSight LDW / allowed alert takes priority over steerRequired alert.
+    # Stock EyeSight LDW / allowed alert takes priority over LKA steerRequired alert.
     state.es_lkas_state_msg["LKAS_Alert"] = 12
     command.hudControl.visualAlert = structs.CarControl.HUDControl.VisualAlert.steerRequired
     hud = _step_to_hud(controller, command, state)
@@ -342,15 +498,14 @@ class TestLegacy2025Aol(unittest.TestCase):
     self.assertEqual(info_parser.vl['ES_Infotainment']['LKAS_State_Infotainment'], 1)
 
     for audible, expected in (
-      (structs.CarControl.HUDControl.AudibleAlert.none, 3),
+      (structs.CarControl.HUDControl.AudibleAlert.none, 0),
       (structs.CarControl.HUDControl.AudibleAlert.warningSoft, 3),
       (structs.CarControl.HUDControl.AudibleAlert.warningImmediate, 4),
     ):
       info_msg = subarucan.create_es_infotainment(
         packer, 1, {'CHECKSUM': 0, 'LKAS_State_Infotainment': 0, 'LKAS_Blue_Lines': 0, 'Signal1': 0, 'Signal2': 0},
         structs.CarControl.HUDControl.VisualAlert.steerRequired,
-        audible_alert=audible,
-        legacy_2025=True,
+        audible_alert=audible, legacy_2025=True,
       )
       info_parser.update([(2, [info_msg])])
       self.assertEqual(info_parser.vl['ES_Infotainment']['LKAS_State_Infotainment'], expected)
@@ -365,29 +520,35 @@ class TestLegacy2025Aol(unittest.TestCase):
       info_parser.update([(3, [info_msg])])
       self.assertEqual(info_parser.vl['ES_Infotainment']['LKAS_State_Infotainment'], 3)
 
-  def test_carcontroller_aol_manumatic_and_unauthorized_gate(self):
-    cp, _, command, state = setup_controller(CAR.SUBARU_LEGACY_2025)
-    cp.alternativeExperience = 32
-    controller = CarController(DBC[CAR.SUBARU_LEGACY_2025], cp)
+  def test_carcontroller_lka_manumatic_and_unauthorized_gate(self):
+    _, controller, command, state = setup_controller(CAR.SUBARU_LEGACY_2025)
     state.out.gearShifter = structs.CarState.GearShifter.manumatic
-    state.lateral_off = False
+    state.lka_armed = True
     state.out.steeringAngleDeg = 0.0
     state.out.steeringRateDeg = 0.0
     state.out.steeringTorque = 0.0
 
-    # Active AOL in manumatic: angle requested, green wheel icon (2), visible left line (1).
+    # Standby HUD in manumatic: no torque/angle request, white wheel icon (1), visible left line (1).
     command.enabled = False
-    command.latActive = True
-    command.hudControl.lanesVisible = True
+    command.latActive = False
     command.hudControl.leftLaneVisible = True
     command.hudControl.rightLaneVisible = False
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 0)
+    hud = _step_to_hud(controller, command, state)
+    self.assertEqual(hud['LKAS_Dash_State'], 1)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
+
+    # Active LKA nudge in manumatic: angle requested, white wheel icon (1), amber left line (3).
+    command.latActive = True
+    command.hudControl.leftLaneDepart = True
     command.actuators.steeringAngleDeg = -8.0
     _, decoded = step(controller, command, state)
     self.assertEqual(decoded['LKAS_Request'], 1)
     self.assertLess(decoded['LKAS_Output'], 0.0)
     hud = _step_to_hud(controller, command, state)
-    self.assertEqual(hud['LKAS_Dash_State'], 2)
-    self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
+    self.assertEqual(hud['LKAS_Dash_State'], 1)
+    self.assertEqual(hud['LKAS_Left_Line_Visible'], 3)
 
     # Unauthorized gate: when controlsd keeps latActive=False, CarController must never request 0x124 torque/angle.
     command.latActive = False
@@ -414,7 +575,7 @@ class TestLegacy2025Aol(unittest.TestCase):
       ret = state.update(parsers)
       self.assertEqual(ret.gearShifter, expected_gear, f'can_gear={can_gear}')
 
-  def test_legacy_2025_acc_lead_led_preserved_and_aol_line_visibility_passthrough(self):
+  def test_legacy_2025_acc_lead_led_preserved_and_asymmetric_aol_line_debounce(self):
     _, _, command, state = setup_controller(CAR.SUBARU_LEGACY_2025)
     cp = CarInterface.get_params(CAR.SUBARU_LEGACY_2025, {0: {}, 1: {}, 2: {0x3C4: 8}}, [], False, False, False)
     controller = CarController(DBC[CAR.SUBARU_LEGACY_2025], cp)
@@ -423,8 +584,6 @@ class TestLegacy2025Aol(unittest.TestCase):
     state.out.vEgo = 20.0
     state.out.standstill = False
 
-    controller.angle_was_active = True
-    command.enabled = command.latActive = True
     # Stock ACC active via Cruise_Activated_Dash + Car_Follow (not gasPressed) preserves dat[5]=0x01 when masking 000104000000.
     state.out.cruiseState.enabled = True
     state.out.gasPressed = False
@@ -465,18 +624,11 @@ class TestLegacy2025Aol(unittest.TestCase):
     self.assertIsNotNone(msg)
     self.assertEqual(msg[1][2:], bytes.fromhex('000000000000'))
 
-    # A controller handoff restores the stock red HUD notification.
-    controller.angle_was_active = False
-    raw = bytearray(bytes.fromhex('00061e0030000000'))
-    raw[0] = (0xC4 + 3 + sum(raw[1:])) & 0xFF
-    state.es_lkas_alert_dat = bytes(raw)
-    self.assertEqual(controller._ascent_lkas_alert(command.as_reader(), state)[1], raw)
-
     # AOL mode passes debounced hudControl lane visibility directly through to cluster CAN.
+    state.lka_armed = False
     state.lateral_off = False
     command.enabled = False
     command.latActive = True
-    command.hudControl.lanesVisible = True
     command.hudControl.leftLaneVisible = True
     command.hudControl.rightLaneVisible = True
     hud = _step_to_hud(controller, command, state)
@@ -492,6 +644,46 @@ class TestLegacy2025Aol(unittest.TestCase):
     hud = _step_to_hud(controller, command, state)
     self.assertEqual(hud['LKAS_Left_Line_Visible'], 1)
 
+    # In LKA nudge mode, same-direction (assisting) torque > 175 overrides equally to opposing torque.
+    state.lka_armed = True
+    command.latActive = True
+    command.actuators.steeringAngleDeg = -8.0
+    state.out.steeringAngleDeg = 0.0
+    state.out.steeringRateDeg = 0.0
+    state.out.steeringTorque = 0.0
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+    state.out.steeringTorque = -150.0
+    step(controller, command, state)
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+    state.out.steeringTorque = -180.0
+    step(controller, command, state)
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 0)
+
+    # Pre-latched curve-holding assisting torque (-175) allows outside-line LKA nudge;
+    # pushing >235 total or opposing >175 still overrides cleanly.
+    command.latActive = False
+    command.hudControl.leftLaneDepart = False
+    state.out.steeringAngleDeg = -10.0
+    state.out.steeringRateDeg = 0.0
+    state.out.steeringTorque = -175.0
+    for _ in range(60):
+      step(controller, command, state)
+    command.latActive = True
+    command.hudControl.leftLaneDepart = True
+    command.actuators.steeringAngleDeg = -13.0
+    state.out.steeringTorque = -183.0
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 1)
+    state.out.steeringTorque = -240.0
+    step(controller, command, state)
+    _, decoded = step(controller, command, state)
+    self.assertEqual(decoded['LKAS_Request'], 0)
+
   def test_aol_wheel_icon_park_reverse_neutral_and_shift_debounce(self):
     _, controller, command, state = setup_controller(CAR.SUBARU_LEGACY_2025)
     state.out.cruiseState.available = True
@@ -499,6 +691,8 @@ class TestLegacy2025Aol(unittest.TestCase):
     state.out.vEgoRaw = 0.0
     state.out.standstill = True
     state.aol_enabled = True
+    state.lka_enabled = True
+    state.lka_armed = False
     state.lateral_off = False
     command.enabled = False
     command.latActive = False

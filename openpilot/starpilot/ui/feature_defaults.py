@@ -38,7 +38,7 @@ BOOL_DEFAULTS = {
   AGGRESSIVE_COOLING_KEY: False,
   CURVE_MASTER_KEY: False, CURVE_NO_LEAD_KEY: False,
   "ShowCSCStatus": False,
-  "ForceAutoTuneOff": False, "AlwaysOnLateral": True, "NostalgiaMode": False,
+  "ForceAutoTuneOff": False, "AlwaysOnLateral": True, "LaneKeepAssist": False, "NostalgiaMode": False,
 }
 FLOAT_SPECS = {
   SURPLUS_KEY: (0, MAX_SURPLUS_MPH, 1, "mph"),
@@ -46,6 +46,8 @@ FLOAT_SPECS = {
   "LaneCenterOffset": (-0.3, 0.3, 0.01, "m"),
   "LaneCenteringE2EAuthority": (0.0, 1.0, 0.05, "fraction"),
   "LaneCenteringStrength": (0.5, STRENGTH_MAX, 0.015, "fraction"),
+  "LaneKeepMinActivationSpeed": (15.0, 45.0, 1.0, "mph"),
+  "LaneKeepLineOffset": (-6.0, 6.0, 1.0, "in"),
   **{f"{name}{suffix}": (0.5, 3.0, 0.05, "s")
      for name in ("Aggressive", "Standard", "Relaxed") for suffix in ("Follow", "FollowHigh")},
   **{f"{name}{suffix}": (25.0, 200.0, 5.0, "%")

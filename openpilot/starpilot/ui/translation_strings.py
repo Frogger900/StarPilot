@@ -125,6 +125,7 @@ MESSAGES = (
   tr_noop("Curve Speed Controller"),
   tr_noop("Speed Limit Controller"),
   tr_noop("Lane Centering"),
+  tr_noop("Lane Keep Assist"),
   tr_noop("Lane Change"),
   tr_noop("Lane Change Settings"),
   tr_noop("Following distance"),

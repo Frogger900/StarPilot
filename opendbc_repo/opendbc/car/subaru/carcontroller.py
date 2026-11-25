@@ -2,13 +2,13 @@ import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
 from opendbc.car.common.filter_simple import FirstOrderFilter
-from opendbc.car.lateral import (apply_driver_steer_torque_limits, apply_std_steer_angle_limits,
+from opendbc.car.lateral import (AngleSteeringLimits, apply_driver_steer_torque_limits, apply_std_steer_angle_limits,
                                 apply_steer_angle_limits_vm, common_fault_avoidance)
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.jacobw_angle import MAX_ANGLE as JACOBW_MAX_ANGLE, filter_angle as jacobw_filter_angle, limit_angle as jacobw_limit_angle
 from opendbc.car.subaru.stock_aol import qualified as subaru_aol_qualified
-from opendbc.car.subaru.values import CAR, FROGGER_ANGLE_SIBLINGS, DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
+from opendbc.car.subaru.values import CAR, FROGGER_ANGLE_SIBLINGS, SUBARU_LKA_CARS, DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
 from opendbc.car.vehicle_model import VehicleModel
 
 # FIXME: These limits aren't exact. The real limit is more than likely over a larger time period and
@@ -17,6 +17,17 @@ MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 GEN2_ANGLE_PORTS = frozenset((CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_LEGACY_2025,
                                CAR.SUBARU_ASCENT_2023, CAR.SUBARU_FORESTER_2022, CAR.SUBARU_OUTBACK_2023))
+
+_LKA_REENGAGE_MAX_STEER_RATE = 25.0
+_LKA_OVERRIDE_TORQUE_HIGH = 175
+_LKA_OVERRIDE_TORQUE_LOW = 110
+_LKA_CURVE_BASE_TORQUE_MAX = 190.0
+_LKA_CURVE_ABS_TORQUE_HIGH = 235.0
+_LKA_ANGLE_LIMITS = AngleSteeringLimits(
+  545,
+  ([0., 5., 15., 35.], [0.24, 0.18, 0.14, 0.09]),  # ~4.1 to 8.6 deg/s smooth LKA nudge onset
+  ([0., 5., 15., 35.], [0.30, 0.22, 0.17, 0.11]),  # smooth unwind back to live wheel angle
+)
 
 
 class CarController(CarControllerBase):
@@ -37,10 +48,18 @@ class CarController(CarControllerBase):
     self.ascent_angle_initialized = False
     self.ascent_es_distance_counter_last = None
     self.ascent_lkas_alert_counter_last = None
+    self.lka_chime_alert_last = structs.CarControl.HUDControl.AudibleAlert.none
+    self.lka_chime_pulse_ticks = 0
     self.aol_non_drive_ticks = 0
     self.aol_dash_green_last = False
+    self.left_depart_latched = False
+    self.right_depart_latched = False
     self.angle_driver_override = False
     self.angle_handoff_active = False
+    self.lka_idle_torque = 0.0
+    self.lka_entry_torque = 0.0
+    self.lka_was_nudge = False
+    self.lka_rate_ramp = 0.0
     self.VM = VehicleModel(CP) if CP.carFingerprint in GEN2_ANGLE_PORTS else None
 
     from opendbc.car.subaru.sng import StopAndGo
@@ -60,14 +79,25 @@ class CarController(CarControllerBase):
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
-  def angle_active(self, CS, available):
+  def angle_active(self, CS, available, lka_nudge=False, apply_angle=None):
     if not available:
       self.angle_driver_override = False
       self.angle_override_frames = 0
       self.angle_handoff_active = False
       return False
-    high, low = (150, 100) if self.CP.carFingerprint in (CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025) else (200, 150)
-    torque = abs(float(CS.out.steeringTorque))
+    if lka_nudge:
+      high, low = (_LKA_OVERRIDE_TORQUE_HIGH, _LKA_OVERRIDE_TORQUE_LOW)
+    else:
+      high, low = (150, 100) if self.CP.carFingerprint in (CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025) else (200, 150)
+    reengage_max_rate = _LKA_REENGAGE_MAX_STEER_RATE if lka_nudge else 2.0
+    raw_torque = float(CS.out.steeringTorque)
+    assist_base = self.lka_entry_torque if lka_nudge else 0.0
+    if assist_base != 0.0 and raw_torque * assist_base > 0.0:
+      rel_torque = abs(raw_torque - assist_base)
+      # Enforce relative delta against entry curve-hold plus an absolute EPS ceiling.
+      torque = max(rel_torque, abs(raw_torque) - (_LKA_CURVE_ABS_TORQUE_HIGH - high))
+    else:
+      torque = abs(raw_torque)
     if self.angle_driver_override:
       if torque < low:
         self.angle_driver_override = False
@@ -82,23 +112,41 @@ class CarController(CarControllerBase):
       self.angle_handoff_active = True
       return False
     if self.angle_handoff_active:
-      if abs(CS.out.steeringRateDeg) <= 2.0:
+      if abs(CS.out.steeringRateDeg) <= reengage_max_rate:
         self.angle_handoff_active = False
       return False
-    if not self.angle_was_active and abs(CS.out.steeringRateDeg) > 2.0:
+    if not self.angle_was_active and abs(CS.out.steeringRateDeg) > reengage_max_rate:
       self.angle_handoff_active = True
       return False
     return True
 
   @staticmethod
-  def _legacy_2025_effective_lateral_off(CS, CC) -> bool:
+  def _subaru_effective_lateral_off(CS, CC) -> bool:
     if bool(getattr(CS, "aol_enabled", True)):
       return bool(getattr(CS, "lateral_off", False))
     return not bool(CC.enabled)
 
-  def _legacy_2025_aol_dash_green(self, hud_control, CS, cruise_available: bool, lateral_off: bool) -> bool:
+  def _update_lka_chime_pulse(self, hud_control) -> bool:
+    VisualAlert = structs.CarControl.HUDControl.VisualAlert
+    AudibleAlert = structs.CarControl.HUDControl.AudibleAlert
+    audible = hud_control.audibleAlert
+    if hud_control.visualAlert == VisualAlert.steerRequired and audible in (AudibleAlert.warningSoft, AudibleAlert.warningImmediate):
+      if audible != self.lka_chime_alert_last:
+        self.lka_chime_pulse_ticks = 0
+        self.lka_chime_alert_last = audible
+      if audible == AudibleAlert.warningSoft:
+        pulse_on = (self.lka_chime_pulse_ticks % 200) < 140
+      else:
+        pulse_on = (self.lka_chime_pulse_ticks % 300) < 220
+      self.lka_chime_pulse_ticks += 1
+      return pulse_on
+    self.lka_chime_alert_last = AudibleAlert.none
+    self.lka_chime_pulse_ticks = 0
+    return True
+
+  def _subaru_aol_dash_green(self, hud_control, CS, cruise_available: bool, lka_mode: bool, lateral_off: bool) -> bool:
     if (
-      lateral_off or not cruise_available or
+      lka_mode or lateral_off or not cruise_available or
       CS.out.steerFaultTemporary or CS.out.steerFaultPermanent
     ):
       self.aol_non_drive_ticks = 0
@@ -127,14 +175,15 @@ class CarController(CarControllerBase):
       return False
     return self.aol_dash_green_last
 
-  def _ascent_lkas_alert(self, CC, CS):
+  def _ascent_lkas_alert(self, CC, CS, chime_pulse_on: bool = True):
     if (self.CP.carFingerprint not in FROGGER_ANGLE_SIBLINGS | {CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025} or
         not self.CP.flags & SubaruFlags.ASCENT_LKAS_ALERT):
       return None
     dat = CS.es_lkas_alert_dat
     frogger_hud = self.CP.carFingerprint != CAR.SUBARU_ASCENT_2023
+    is_lka_mode = self.CP.carFingerprint in SUBARU_LKA_CARS and bool(getattr(CS, "lka_armed", False))
     lateral_active = self.angle_was_active and CC.latActive and (
-      CC.enabled or subaru_aol_qualified(self.CP, marked_only=True)
+      CC.enabled or subaru_aol_qualified(self.CP, marked_only=True) or is_lka_mode
     )
     if frogger_hud:
       armed = CS.out.cruiseState.available
@@ -154,6 +203,7 @@ class CarController(CarControllerBase):
       msg = subarucan.create_ascent_lkas_alert(
         dat, lateral_active, CC.hudControl.visualAlert,
         armed=armed, acc_lead_visible=acc_lead_visible, legacy_2025=True,
+        audible_alert=CC.hudControl.audibleAlert, chime_pulse_on=chime_pulse_on,
       )
     else:
       msg = subarucan.create_ascent_lkas_alert(dat, lateral_active, CC.hudControl.visualAlert)
@@ -187,9 +237,43 @@ class CarController(CarControllerBase):
                                              CC.enabled or CC.latActive or CC.longActive))
 
     # *** steering ***
+    lka_supported = self.CP.carFingerprint in SUBARU_LKA_CARS
+    is_lka_mode = lka_supported and bool(getattr(CS, "lka_armed", False))
+    is_lka_nudge = is_lka_mode and bool(CC.latActive)
     angle_target = actuators.steeringAngleDeg
+    if not is_lka_mode:
+      self.lka_idle_torque = 0.0
+      self.lka_entry_torque = 0.0
+      self.lka_was_nudge = False
+    elif not is_lka_nudge:
+      self.lka_idle_torque = 0.92 * self.lka_idle_torque + 0.08 * float(CS.out.steeringTorque)
+      self.lka_entry_torque = 0.0
+      self.lka_was_nudge = False
+    elif not self.lka_was_nudge:
+      if hud_control.leftLaneDepart:
+        nudge_sign = -1.0
+      elif hud_control.rightLaneDepart:
+        nudge_sign = 1.0
+      else:
+        angle_delta = float(angle_target - CS.out.steeringAngleDeg)
+        nudge_sign = -1.0 if angle_delta < -0.1 else (1.0 if angle_delta > 0.1 else 0.0)
+      if nudge_sign < 0.0:
+        self.lka_entry_torque = float(np.clip(self.lka_idle_torque, -_LKA_CURVE_BASE_TORQUE_MAX, 0.0))
+      elif nudge_sign > 0.0:
+        self.lka_entry_torque = float(np.clip(self.lka_idle_torque, 0.0, _LKA_CURVE_BASE_TORQUE_MAX))
+      else:
+        self.lka_entry_torque = 0.0
+      self.lka_was_nudge = True
     if self.angle_filter is not None:
-      angle_target = jacobw_filter_angle(self.angle_filter, angle_target, CS.out.vEgo, CC.latActive)
+      if is_lka_mode:
+        if CC.latActive:
+          self.angle_filter.update_alpha(0.03)
+          angle_target = self.angle_filter.update(angle_target)
+        else:
+          self.angle_filter.x = CS.out.steeringAngleDeg
+          angle_target = CS.out.steeringAngleDeg
+      else:
+        angle_target = jacobw_filter_angle(self.angle_filter, angle_target, CS.out.vEgo, CC.latActive)
     if (self.frame % self.p.STEER_STEP) == 0:
       if self.CP.carFingerprint in GEN2_ANGLE_PORTS:
         independent_lateral = subaru_aol_qualified(self.CP, marked_only=True)
@@ -207,13 +291,13 @@ class CarController(CarControllerBase):
           aol_motion_ok = CC.enabled or (CS.out.vEgoRaw > 0.44704 and
                                          (abs(CS.out.steeringAngleDeg) < 120. or angle_continuation))
           gear_ok = CS.out.gearShifter == structs.CarState.GearShifter.drive
-        legacy_lateral_off = self._legacy_2025_effective_lateral_off(CS, CC) if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025 else False
+        lateral_off = self._subaru_effective_lateral_off(CS, CC) if lka_supported else False
         angle_available = (CC.latActive and aol_motion_ok and CS.out.cruiseState.available and
-                           (independent_lateral or (CC.enabled and CS.out.cruiseState.enabled and not CS.out.brakePressed)) and
+                           (independent_lateral or is_lka_nudge or (CC.enabled and CS.out.cruiseState.enabled and not CS.out.brakePressed)) and
                            gear_ok and
-                           not legacy_lateral_off and
+                           not lateral_off and
                            not CS.out.standstill and not CS.out.steerFaultTemporary and not CS.out.steerFaultPermanent)
-        angle_active = self.angle_active(CS, angle_available)
+        angle_active = self.angle_active(CS, angle_available, lka_nudge=is_lka_nudge, apply_angle=angle_target)
         if self.CP.carFingerprint in FROGGER_ANGLE_SIBLINGS | {CAR.SUBARU_LEGACY_2025}:
           if angle_active and self.angle_was_active and abs(self.apply_angle_last - CS.out.steeringAngleDeg) > 5.0:
             self.eps_stall_count += 1
@@ -230,20 +314,34 @@ class CarController(CarControllerBase):
           self.apply_angle_last = CS.out.steeringAngleDeg
           self.ascent_angle_initialized = True
           angle_active = False
-        if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+        if is_lka_nudge:
+          raw_angle = apply_std_steer_angle_limits(angle_target, self.apply_angle_last,
+                                                   CS.out.vEgoRaw, CS.out.steeringAngleDeg, angle_active,
+                                                   _LKA_ANGLE_LIMITS)
+          if angle_active:
+            self.lka_rate_ramp = min(1.0, self.lka_rate_ramp + 0.05)
+            apply_angle = self.apply_angle_last + self.lka_rate_ramp * (raw_angle - self.apply_angle_last)
+          else:
+            self.lka_rate_ramp = 0.0
+            apply_angle = raw_angle
+        elif self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+          self.lka_rate_ramp = 0.0
           apply_angle = apply_std_steer_angle_limits(angle_target, self.apply_angle_last,
                                                      CS.out.vEgoRaw, CS.out.steeringAngleDeg, angle_active,
                                                      self.p.LEGACY_2025_ANGLE_LIMITS)
         elif self.CP.carFingerprint in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_OUTBACK_2023):
+          self.lka_rate_ramp = 0.0
           apply_angle = apply_std_steer_angle_limits(actuators.steeringAngleDeg, self.apply_angle_last,
                                                      CS.out.vEgoRaw, CS.out.steeringAngleDeg, angle_active,
                                                      self.p.FIXED_ANGLE_LIMITS)
         elif self.CP.carFingerprint in (CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025):
+          self.lka_rate_ramp = 0.0
           assert self.VM is not None
           apply_angle, angle_active = jacobw_limit_angle(
             angle_target, self.apply_angle_last, CS.out.vEgo,
             CS.out.steeringAngleDeg, angle_active, self.p, self.VM)
         else:
+          self.lka_rate_ramp = 0.0
           assert self.VM is not None
           apply_angle = apply_steer_angle_limits_vm(actuators.steeringAngleDeg, self.apply_angle_last,
                                                     CS.out.vEgoRaw, CS.out.steeringAngleDeg, angle_active,
@@ -251,7 +349,8 @@ class CarController(CarControllerBase):
         self.apply_angle_last = apply_angle
         self.angle_was_active = angle_active
         angle_bus = CanBus.main
-        can_sends.append(subarucan.create_steering_control_angle(self.packer, apply_angle, angle_active, angle_bus))
+        set_3 = 2 if is_lka_mode else 3
+        can_sends.append(subarucan.create_steering_control_angle(self.packer, apply_angle, angle_active, angle_bus, set_3=set_3))
       else:
         apply_torque = int(round(actuators.torque * self.p.STEER_MAX))
 
@@ -307,16 +406,18 @@ class CarController(CarControllerBase):
     can_sends.extend(send_sng(self, CC, CS, now_nanos))
 
     # *** alerts and pcm cancel ***
+    chime_pulse_on = self._update_lka_chime_pulse(hud_control)
     frogger_hud = self.CP.carFingerprint in FROGGER_ANGLE_SIBLINGS | {CAR.SUBARU_LEGACY_2025}
     enabled_for_dash_2025 = self.angle_was_active
-    if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
-      enabled_for_dash_2025 = self._legacy_2025_aol_dash_green(
+    if lka_supported:
+      enabled_for_dash_2025 = self._subaru_aol_dash_green(
         hud_control,
         CS,
         bool(CS.out.cruiseState.available),
-        self._legacy_2025_effective_lateral_off(CS, CC),
+        bool(lka_supported and getattr(CS, "lka_armed", False)),
+        bool(getattr(CS, "lateral_off", False)),
       )
-    lkas_alert_msg = self._ascent_lkas_alert(CC, CS)
+    lkas_alert_msg = self._ascent_lkas_alert(CC, CS, chime_pulse_on=chime_pulse_on)
     if lkas_alert_msg is not None:
       can_sends.append(lkas_alert_msg)
     if self.CP.flags & SubaruFlags.PREGLOBAL:
@@ -346,29 +447,63 @@ class CarController(CarControllerBase):
         if frogger_hud:
           in_drive = CS.out.gearShifter in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.manumatic)
           cruise_available = CS.out.cruiseState.available
-          lateral_off = self._legacy_2025_effective_lateral_off(CS, CC)
-          aol_enabled = bool(getattr(CS, "aol_enabled", True))
-          if self.CP.carFingerprint in FROGGER_ANGLE_SIBLINGS:
-            aol_enabled = aol_enabled and subaru_aol_qualified(self.CP, marked_only=True)
-          wheel_ready = bool(cruise_available and aol_enabled)
-          lanes_visible = hud_control.lanesVisible or (
-            self.CP.carFingerprint in FROGGER_ANGLE_SIBLINGS and self.angle_was_active)
-          if not (in_drive and cruise_available) or lateral_off or not lanes_visible:
-            left_line = 0
-            right_line = 0
-            left_depart = False
-            right_depart = False
+          if lka_supported:
+            lka_mode = bool(getattr(CS, "lka_armed", False))
+            lateral_off = bool(getattr(CS, "lateral_off", False))
+            any_lateral_toggle_on = bool(getattr(CS, "aol_enabled", True)) or bool(getattr(CS, "lka_enabled", False))
+            wheel_ready = bool(cruise_available and any_lateral_toggle_on)
+            if not (in_drive and cruise_available) or lateral_off:
+              self.left_depart_latched = False
+              self.right_depart_latched = False
+              left_line = 0
+              right_line = 0
+              left_depart = False
+              right_depart = False
+            else:
+              steer_gate = abs(CS.out.steeringAngleDeg) >= 20.0 if lka_mode else False
+              blinker_gate = lka_mode and (CS.out.leftBlinker or CS.out.rightBlinker)
+              if blinker_gate:
+                self.left_depart_latched = False
+                self.right_depart_latched = False
+                left_depart = False
+                right_depart = False
+                left_line = 0
+                right_line = 0
+              else:
+                raw_left_depart = bool(hud_control.leftLaneDepart)
+                raw_right_depart = bool(hud_control.rightLaneDepart)
+                left_depart = (raw_left_depart or self.left_depart_latched) and not CS.out.leftBlinker
+                right_depart = (raw_right_depart or self.right_depart_latched) and not CS.out.rightBlinker
+                self.left_depart_latched = raw_left_depart
+                self.right_depart_latched = raw_right_depart
+
+                left_line = 3 if left_depart else (0 if steer_gate else (1 if hud_control.leftLaneVisible else 0))
+                right_line = 3 if right_depart else (0 if steer_gate else (1 if hud_control.rightLaneVisible else 0))
           else:
-            left_line = 1 if hud_control.leftLaneVisible else 0
-            right_line = 1 if hud_control.rightLaneVisible else 0
-            left_depart = bool(hud_control.leftLaneDepart)
-            right_depart = bool(hud_control.rightLaneDepart)
+            lateral_off = self._subaru_effective_lateral_off(CS, CC)
+            aol_enabled = bool(getattr(CS, "aol_enabled", True))
+            if self.CP.carFingerprint in FROGGER_ANGLE_SIBLINGS:
+              aol_enabled = aol_enabled and subaru_aol_qualified(self.CP, marked_only=True)
+            wheel_ready = bool(cruise_available and aol_enabled)
+            lanes_visible = hud_control.lanesVisible or (
+              self.CP.carFingerprint in FROGGER_ANGLE_SIBLINGS and self.angle_was_active)
+            if not (in_drive and cruise_available) or lateral_off or not lanes_visible:
+              left_line = 0
+              right_line = 0
+              left_depart = False
+              right_depart = False
+            else:
+              left_line = 1 if hud_control.leftLaneVisible else 0
+              right_line = 1 if hud_control.rightLaneVisible else 0
+              left_depart = bool(hud_control.leftLaneDepart)
+              right_depart = bool(hud_control.rightLaneDepart)
 
           can_sends.append(subarucan.create_es_lkas_state(
             self.packer, self.frame // 10, CS.es_lkas_state_msg, enabled_for_dash_2025, hud_control.visualAlert,
             left_line, right_line, left_depart, right_depart,
             ready=wheel_ready, lkas_active=True, in_drive=in_drive,
             steering_active=self.angle_was_active and CC.latActive,
+            audible_alert=hud_control.audibleAlert, chime_pulse_on=chime_pulse_on,
           ))
         else:
           lkas_active = self.angle_was_active if self.CP.carFingerprint in GEN2_ANGLE_PORTS else CC.enabled

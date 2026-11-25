@@ -4,7 +4,7 @@ import { GalaxySettingRow } from "../web/js/galaxy-setting-row.js"
 import { compile } from "../web/vendor/vue/vue.esm-browser.js"
 
 assert.deepEqual(SETTINGS_SECTIONS.find(section => section.id === 'lateral').pages,
-  ['aol', 'lane_change', 'lane', 'torque', 'torque/developer'], 'Developer Parameters stays last in the requested lateral order')
+  ['aol', 'lane_change', 'lane', 'lka', 'torque', 'torque/developer'], 'Developer Parameters stays last in the requested lateral order')
 
 const requests = [], updates = []
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }

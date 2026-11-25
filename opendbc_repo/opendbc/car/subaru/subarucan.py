@@ -14,11 +14,11 @@ def create_steering_control(packer, apply_torque, steer_req):
   return packer.make_can_msg("ES_LKAS", 0, values)
 
 
-def create_steering_control_angle(packer, apply_torque, steer_req, bus=CanBus.main):
+def create_steering_control_angle(packer, apply_torque, steer_req, bus=CanBus.main, set_3=3):
   values = {
     "LKAS_Output": apply_torque,
     "LKAS_Request": steer_req,
-    "SET_3": 3
+    "SET_3": set_3
   }
   return packer.make_can_msg("ES_LKAS_ANGLE", bus, values)
 
@@ -69,7 +69,8 @@ def create_es_distance(packer, frame, es_distance_msg, bus, pcm_cancel_cmd, long
 
 
 def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert, left_line, right_line, left_lane_depart, right_lane_depart,
-                         ready=None, lkas_active=None, in_drive=False, steering_active=False):
+                         ready=None, lkas_active=None, in_drive=False, steering_active=None,
+                         audible_alert=AudibleAlert.none, chime_pulse_on=True):
   values = {s: es_lkas_state_msg[s] for s in [
     "CHECKSUM",
     "LKAS_Alert_Msg",
@@ -90,13 +91,14 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
 
   values["COUNTER"] = frame % 0x10
 
-  legacy_2025_hud = (ready is not None) or (lkas_active is not None)
-  if legacy_2025_hud:
+  subaru_lka_hud = (ready is not None) or (lkas_active is not None) or (left_line == 3) or (right_line == 3)
+  if subaru_lka_hud:
     # Filter stock EyeSight centering engage/cancel and "Keep hands on wheel" alerts
     # (25: centering engage beep, 27: centering off beep, 28: hands-on warning beep, 30: hands-on OFF cancel beep)
-    if steering_active and values["LKAS_Alert"] in (25, 27, 28, 30) and values["LKAS_Alert_Msg"] in (0, 1, 7):
+    scrub_active = steering_active is None or bool(steering_active)
+    if scrub_active and values["LKAS_Alert"] in (25, 27, 28, 30) and values["LKAS_Alert_Msg"] in (0, 1, 7):
       values["LKAS_Alert"] = 0
-    if steering_active and values["LKAS_Alert_Msg"] in (1, 7) and values["LKAS_Alert"] == 0:
+    if scrub_active and values["LKAS_Alert_Msg"] in (1, 7) and values["LKAS_Alert"] == 0:
       values["LKAS_Alert_Msg"] = 0
   else:
     # Filter the stock LKAS "Keep hands on wheel" alert
@@ -122,9 +124,16 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
   # Preserve stock EyeSight Lane Departure Warnings (11, 12) at all times.
   # Show Keep hands on wheel alert for openpilot steerRequired alert
   if visual_alert == VisualAlert.steerRequired:
-    if legacy_2025_hud:
+    if subaru_lka_hud:
       if values["LKAS_Alert"] == 0 and values["LKAS_Alert_Msg"] == 0:
-        values["LKAS_Alert_Msg"] = 1
+        if audible_alert == AudibleAlert.warningImmediate:
+          values["LKAS_Alert_Msg"] = 7
+          values["LKAS_Alert"] = 30 if chime_pulse_on else 0
+        elif audible_alert == AudibleAlert.warningSoft:
+          values["LKAS_Alert_Msg"] = 7
+          values["LKAS_Alert"] = 28 if chime_pulse_on else 0
+        else:
+          values["LKAS_Alert_Msg"] = 1
     else:
       values["LKAS_Alert_Msg"] = 1
 
@@ -135,7 +144,7 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
     elif right_lane_depart:
       values["LKAS_Alert"] = 11  # Right lane departure dash alert
 
-  if legacy_2025_hud:
+  if subaru_lka_hud:
     screen_active = True if lkas_active is None else bool(lkas_active)
     if screen_active:
       values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines / keep screen active
@@ -155,8 +164,16 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
       values["LKAS_Right_Line_Enable"] = 0
       line_visible = 0
 
-    values["LKAS_Left_Line_Visible"] = line_visible if left_line else 0
-    values["LKAS_Right_Line_Visible"] = line_visible if right_line else 0
+    # Support line value 3 (Amber / Yellow) for active LKA boundary nudges / departures
+    if left_line == 3:
+      values["LKAS_Left_Line_Visible"] = 3
+    else:
+      values["LKAS_Left_Line_Visible"] = line_visible if left_line else 0
+
+    if right_line == 3:
+      values["LKAS_Right_Line_Visible"] = 3
+    else:
+      values["LKAS_Right_Line_Visible"] = line_visible if right_line else 0
   else:
     if enabled:
       values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines
@@ -285,12 +302,15 @@ def create_es_infotainment(packer, frame, es_infotainment_msg, visual_alert, aud
   if values["LKAS_State_Infotainment"] in (3, 4):
     values["LKAS_State_Infotainment"] = 0
 
-  # Show Keep hands on wheel alert for openpilot steerRequired alert
+  # Show Keep hands on wheel alert for openpilot steerRequired alert:
+  # on Legacy 2025, 3 adds flashing yellow border (10s warningSoft) and 4 adds wheel OFF lockout (15s warningImmediate).
   if visual_alert == VisualAlert.steerRequired:
     if legacy_2025:
-      # 4 adds wheel OFF icon on lockout without clobbering existing warnings
       if values["LKAS_State_Infotainment"] == 0:
-        values["LKAS_State_Infotainment"] = 4 if audible_alert == AudibleAlert.warningImmediate else 3
+        if audible_alert == AudibleAlert.warningImmediate:
+          values["LKAS_State_Infotainment"] = 4
+        elif audible_alert == AudibleAlert.warningSoft:
+          values["LKAS_State_Infotainment"] = 3
     else:
       values["LKAS_State_Infotainment"] = 3
 
@@ -308,6 +328,8 @@ def create_ascent_lkas_alert(
   armed: bool = False,
   acc_lead_visible: bool = False,
   legacy_2025: bool = False,
+  audible_alert=AudibleAlert.none,
+  chime_pulse_on: bool = True,
 ):
   address = 0x3C4
   if len(raw_dat) != 8 or raw_dat[0] != (((address & 0xff) + (address >> 8) + sum(raw_dat[1:])) & 0xff):
@@ -319,17 +341,26 @@ def create_ascent_lkas_alert(
   if legacy_2025 and armed:
     # 0x3C4 on Legacy 2025: dat[2]=chime (0x18 chirp, 0x1a/0x1b single, 0x1c 2x bouncy, 0x1e 4x strong),
     # dat[3]=small-screen popup (0x01 hands-on, 0x07 flashing), dat[4]=HUD LEDs (0x01/0x02/0x04 yellow, 0x10/0x20/0x40 red).
-    target_alert = b"\x00\x01\x04" if visual_alert == VisualAlert.steerRequired else None
+    target_alert = None
+    if visual_alert == VisualAlert.steerRequired:
+      if audible_alert == AudibleAlert.warningImmediate:
+        target_alert = b"\x1e\x07\x30" if chime_pulse_on else b"\x00\x07\x30"
+      elif audible_alert == AudibleAlert.warningSoft:
+        target_alert = b"\x1c\x07\x04" if chime_pulse_on else b"\x00\x07\x04"
+      else:
+        target_alert = b"\x00\x01\x04"
 
-    # Only deduplicate EyeSight prompts while we are requesting steering.
-    duplicate = dat[2:5] in (
-      b"\x00\x01\x04", b"\x00\x07\x04", b"\x00\x07\x30",
-      b"\x00\x00\x02", b"\x00\x00\x30", b"\x1b\x00\x00", b"\x19\x00\x00",
-      b"\x1c\x07\x04", b"\x1e\x00\x30", b"\x19\x01\x04",
-    )
-    if lateral_active and duplicate and dat[2:5] != target_alert:
-      dat[2:5] = b"\x00\x00\x00"
-      changed = True
+    # Suppress all background EyeSight centering/toggle/hands-off alerts whenever Cruise Main is armed,
+    # while preserving stock FCW (0x01, 0x02, 0x0e), native LDW (0x0b, 0x0c), and opaque status bits in dat[5:].
+    if dat[2] in (0x19, 0x1b, 0x1c, 0x1e) or (
+      dat[2] == 0x00 and (
+        (dat[3] in (0x01, 0x07) and dat[4] in (0x04, 0x30)) or
+        (dat[3] == 0x00 and dat[4] in (0x02, 0x30))
+      )
+    ):
+      if not (target_alert is not None and dat[2:5] == target_alert):
+        dat[2:5] = b"\x00\x00\x00"
+        changed = True
     if target_alert is not None:
       if dat[2:5] == b"\x00\x00\x00":
         dat[2:5] = target_alert

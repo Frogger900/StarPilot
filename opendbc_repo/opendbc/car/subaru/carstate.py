@@ -3,7 +3,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs, create_button_events
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.subaru.values import CAR, DBC, CanBus, SubaruFlags
+from opendbc.car.subaru.values import CAR, DBC, CanBus, SUBARU_LKA_CARS, SubaruFlags
 from opendbc.car import CanSignalRateCalculator
 
 # 8-speed Lineartronic CVT simulated paddle-shift ratios 1..8 on 0x48 Transmission.Gear
@@ -39,30 +39,62 @@ class CarState(CarStateBase):
     self.high_angle_cut = False
     self.prev_cam_lkas_toggle: bool | None = None
     self.prev_cruise_available: bool | None = None
+    self.lka_armed = False
     self.aol_enabled = True
+    self.lka_enabled = False
+    self.last_lateral_mode_centering = True
     self.lateral_off = False
-    self._prev_aol_enabled: bool | None = None
+    self._prev_lka_mode_settings: tuple[bool, bool] | None = None
+    self._last_lateral_mode_seeded = False
+    self._lka_button_seen = False
     self._lkas_event_hold_frames = 0
     self._lkas_mode_settle_frames = 0
 
-  def _sync_legacy_2025_lateral_mode(self, cruise_available: bool, lkas_pressed: bool) -> None:
+  def _sync_subaru_lateral_mode(self, cruise_available: bool, lkas_pressed: bool) -> None:
     aol = bool(getattr(self, "aol_enabled", True))
+    lka = bool(getattr(self, "lka_enabled", False))
+    mode_settings = (aol, lka)
     if not cruise_available:
-      self.lateral_off = not aol
+      self.lka_armed = False
+      self.lateral_off = not aol and not lka
       self._lkas_mode_settle_frames = 0
-      self._prev_aol_enabled = aol
+      self._prev_lka_mode_settings = mode_settings
       return
 
-    entered_mode = (not bool(self.prev_cruise_available)) or (aol != self._prev_aol_enabled)
+    entered_mode = (not bool(self.prev_cruise_available)) or (mode_settings != self._prev_lka_mode_settings)
     if entered_mode:
       self._lkas_mode_settle_frames = 15
-      self.lateral_off = not aol
+      if aol and lka:
+        self.lka_armed = not bool(self.last_lateral_mode_centering)
+        self.lateral_off = False
+      elif aol:
+        self.lka_armed = False
+        self.lateral_off = False
+      elif lka:
+        self.lka_armed = True
+        self.lateral_off = False
+      else:
+        self.lka_armed = False
+        self.lateral_off = True
     elif lkas_pressed:
       self._lkas_mode_settle_frames = 15
-      self.lateral_off = (not self.lateral_off) if aol else True
+      self._lka_button_seen = True
+      if aol and lka:
+        self.lka_armed = not self.lka_armed
+        self.lateral_off = False
+        self.last_lateral_mode_centering = not self.lka_armed
+      elif aol:
+        self.lka_armed = False
+        self.lateral_off = not self.lateral_off
+      elif lka:
+        self.lateral_off = not self.lateral_off
+        self.lka_armed = not self.lateral_off
+      else:
+        self.lka_armed = False
+        self.lateral_off = True
     else:
       self._lkas_mode_settle_frames = max(0, self._lkas_mode_settle_frames - 1)
-    self._prev_aol_enabled = aol
+    self._prev_lka_mode_settings = mode_settings
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -188,7 +220,7 @@ class CarState(CarStateBase):
       self.es_lkas_state_msg = copy.copy(cp_cam.vl["ES_LKAS_State"])
       self.es_brake_msg = copy.copy(cp_es_brake.vl["ES_Brake"])
 
-      if self.CP.carFingerprint == CAR.SUBARU_LEGACY_2025:
+      if self.CP.carFingerprint in SUBARU_LKA_CARS:
         cam_lkas_toggle = int(self.es_lkas_state_msg.get("LKAS_Dash_State", 0)) > 0
         steer_fault = bool(ret.steerFaultTemporary or ret.steerFaultPermanent)
         lkas_pressed = False
@@ -213,7 +245,7 @@ class CarState(CarStateBase):
             ])
             ret.buttonEvents = button_events
             self._lkas_event_hold_frames -= 1
-        self._sync_legacy_2025_lateral_mode(bool(ret.cruiseState.available), lkas_pressed)
+        self._sync_subaru_lateral_mode(bool(ret.cruiseState.available), lkas_pressed)
         self.prev_cruise_available = bool(ret.cruiseState.available)
 
       # TODO: Hybrid cars don't have ES_Distance, need a replacement

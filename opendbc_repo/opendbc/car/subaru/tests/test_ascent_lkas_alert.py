@@ -75,9 +75,7 @@ class TestAscentLkasAlert(unittest.TestCase):
       return bytes(dat)
 
     for payload in ("000104000000", "1c0704000000", "000704000000", "1e0030000000", "1b0000000000", "000002000000"):
-      raw = packet(payload)
-      self.assertEqual(subarucan.create_ascent_lkas_alert(raw, False, 0, armed=True, legacy_2025=True)[1], raw)
-      msg = subarucan.create_ascent_lkas_alert(raw, True, 0, armed=True, acc_lead_visible=False, legacy_2025=True)
+      msg = subarucan.create_ascent_lkas_alert(packet(payload), False, 0, armed=True, acc_lead_visible=False, legacy_2025=True)
       self.assertEqual(msg[1][2:5], b"\x00\x00\x00", payload)
       self.assertEqual(msg[1][0], (0xC4 + 3 + sum(msg[1][1:])) & 0xFF)
 
@@ -85,11 +83,18 @@ class TestAscentLkasAlert(unittest.TestCase):
     msg = subarucan.create_ascent_lkas_alert(packet("000104000000"), True, 0, armed=True, acc_lead_visible=True, legacy_2025=True)
     self.assertEqual(msg[1][2:], bytes.fromhex("000000010000"))
 
-    # Native LDW (0x0b, 0x0c) and openpilot steerRequired (000104000000) work cleanly.
+    # Native LDW (0x0b, 0x0c) and staged LKA hands-on alerts (5s/10s/15s) work cleanly.
     ldw = packet("0b0000010000")
     self.assertEqual(subarucan.create_ascent_lkas_alert(ldw, True, 0, armed=True, legacy_2025=True)[1], ldw)
-    hands_on = subarucan.create_ascent_lkas_alert(
-      packet("000000010000"), False, structs.CarControl.HUDControl.VisualAlert.steerRequired,
-      armed=True, legacy_2025=True,
-    )
-    self.assertEqual(hands_on[1][2:], bytes.fromhex("000104000000"))
+    for audible, pulse, expected_hex in (
+      (structs.CarControl.HUDControl.AudibleAlert.none, True, "000104000000"),
+      (structs.CarControl.HUDControl.AudibleAlert.warningSoft, True, "1c0704000000"),
+      (structs.CarControl.HUDControl.AudibleAlert.warningSoft, False, "000704000000"),
+      (structs.CarControl.HUDControl.AudibleAlert.warningImmediate, True, "1e0730000000"),
+      (structs.CarControl.HUDControl.AudibleAlert.warningImmediate, False, "000730000000"),
+    ):
+      hands_on = subarucan.create_ascent_lkas_alert(
+        packet("000000010000"), False, structs.CarControl.HUDControl.VisualAlert.steerRequired,
+        armed=True, legacy_2025=True, audible_alert=audible, chime_pulse_on=pulse,
+      )
+      self.assertEqual(hands_on[1][2:], bytes.fromhex(expected_hex))

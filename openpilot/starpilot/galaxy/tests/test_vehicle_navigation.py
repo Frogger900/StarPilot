@@ -10,7 +10,7 @@ import unittest
 
 
 class TestVehicleNavigation(unittest.TestCase):
-  def gateway(self, *, supported=True, parked=True, numeric_only=False):
+  def gateway(self, *, supported=True, parked=True, numeric_only=False, lka_supported=False):
     source = ast.parse((Path(__file__).parents[1] / 'settings.py').read_text())
     constants = [node for node in source.body if isinstance(node, ast.Assign) and
                  any(isinstance(target, ast.Name) and target.id in ('PAGES', 'MAX_VIEWS', 'TTL', 'CAR_CONTROL_SECTIONS')
@@ -22,7 +22,7 @@ class TestVehicleNavigation(unittest.TestCase):
     exec(compile(ast.Module(body=constants + [page], type_ignores=[]), 'settings.py', 'exec'), namespace)
     control = SimpleNamespace(choices=('Off', 'On'), page='')
     states = {name: SimpleNamespace(title=name, subtitle='', parked=parked, rows=()) for name in namespace['PAGES']}
-    pages = ('aol', 'lane_change', 'lane', 'torque', 'torque/developer')
+    pages = ('aol', 'lane_change', 'lane', *(('lka',) if lka_supported else ()), 'torque', 'torque/developer')
     for name in pages:
       states[name].rows = (control,)
     states['torque/developer'].rows = (SimpleNamespace(choices=(), page=''),) if numeric_only else (control,) if supported else ()
@@ -38,6 +38,11 @@ class TestVehicleNavigation(unittest.TestCase):
         result = self.gateway(parked=parked)()
         lateral = next(section for section in result['sections'] if section['id'] == 'lateral')
         self.assertEqual([page['id'] for page in lateral['pages']], ['aol', 'lane_change', 'lane', 'torque', 'torque/developer'])
+
+  def test_subaru_lka_page_appears_in_lateral_section_between_lane_and_torque(self):
+    result = self.gateway(lka_supported=True)()
+    lateral = next(section for section in result['sections'] if section['id'] == 'lateral')
+    self.assertEqual([page['id'] for page in lateral['pages']], ['aol', 'lane_change', 'lane', 'lka', 'torque', 'torque/developer'])
 
   def test_unsupported_developer_controls_remain_hidden(self):
     result = self.gateway(supported=False)()

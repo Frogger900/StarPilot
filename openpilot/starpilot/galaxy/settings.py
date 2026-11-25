@@ -40,7 +40,7 @@ from openpilot.starpilot.ui.vasm_owner import ANNOTATION as VASM_ANNOTATION, RES
 
 
 PAGES = frozenset(("hub", "developer", "localization", "starport_options", "vehicle",
-                   "slc", "lane", "lane_change", "profiles", "profiles/developer", "personalities",
+                   "slc", "lane", "lka", "lane_change", "profiles", "profiles/developer", "personalities",
                    "traffic", "aggressive", "standard", "relaxed",
                    "curve", "torque", "torque/developer", "tuning", "torque/bluepilot", "aol", "wheel", "appearance", "display",
                    "data", "power", "sounds", "pip", "sentry", "vasm",
@@ -54,7 +54,7 @@ TTL = 60.0
 
 # Android Auto lists binary controls only.
 CAR_CONTROL_SECTIONS = (
-  ("lateral", "Lateral (Steering)", ("aol", "lane_change", "lane", "torque", "torque/developer")),
+  ("lateral", "Lateral (Steering)", ("aol", "lane_change", "lane", "lka", "torque", "torque/developer")),
   ("longitudinal", "Longitudinal (Speed & Following)",
    ("profiles", "conditional", "curve", "slc", "aggressive", "standard", "relaxed", "traffic")),
   ("wheel", "Wheel Controls", ("wheel",)),
@@ -684,7 +684,7 @@ class SettingsGateway:
       return self._vasm_owner(ctx).snapshot()
     state = self._owner(ctx).snapshot(page, parked=ctx.parked,
                                       system_long=_qualified(ctx, "long"),
-                                      lateral_context=_qualified(ctx, "lane") or (page == "lane" and _qualified(ctx, "lane_live")),
+                                      lateral_context=_qualified(ctx, "lane") or (page in ("lane", "lka") and _qualified(ctx, "lane_live")),
                                       metric=ctx.metric, configure_while_driving=True)
     if page == "data":
       state = replace(state, title="Data & Connections")

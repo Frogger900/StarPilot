@@ -150,7 +150,7 @@ def test_outback_main_intent_uses_only_existing_exact_native_profiles():
   assert qualified(outback) and not create_intent(outback, owner().settings).main_arm
 
 
-def test_legacy_2025_manumatic_and_aol_intent():
+def test_legacy_2025_manumatic_and_lka_intent():
   from opendbc.car.subaru.interface import CarInterface
   from opendbc.car.subaru.stock_aol import qualified
   from opendbc.car.subaru.values import CAR
@@ -172,12 +172,12 @@ def test_legacy_2025_manumatic_and_aol_intent():
   assert unsupported_gear(outback_2023, Gear.manumatic)
   assert unsupported_gear(ascent_2023, Gear.manumatic)
 
-  aol_settings = AolSettings(True, 0., 0, 0, (0, 0, 0), (0, 0, 0))
-  disabled_settings = AolSettings(False, 0., 0, 0, (0, 0, 0), (0, 0, 0))
-  assert independent_axis_requested(aol_settings)
+  lka_only_settings = AolSettings(False, 0., 0, 0, (0, 0, 0), (0, 0, 0), lka_enabled=True)
+  disabled_settings = AolSettings(False, 0., 0, 0, (0, 0, 0), (0, 0, 0), lka_enabled=False)
+  assert independent_axis_requested(lka_only_settings)
   assert not independent_axis_requested(disabled_settings)
 
-  legacy_intent = create_intent(legacy, aol_settings)
+  legacy_intent = create_intent(legacy, lka_only_settings)
   assert qualified(legacy) and legacy_intent.main_arm and legacy_intent.allow_manumatic
 
   legacy_cs = state()
@@ -201,35 +201,22 @@ def test_legacy_2025_manumatic_and_aol_intent():
   assert legacy_intent.allowed_latch
 
 
-def test_legacy_2025_line_visibility_and_passive_dashcam_chimes():
+def test_legacy_2025_passive_dashcam_silences_chimes_and_lka_hands_warn():
   import time
+  from unittest.mock import Mock
   from openpilot.cereal import log, messaging
   from openpilot.common.params import Params
-  from openpilot.selfdrive.controls.controlsd import _update_subaru_line_visibility
   from openpilot.selfdrive.selfdrived.alertmanager import AlertManager
   from openpilot.selfdrive.selfdrived.events import Events
   from openpilot.selfdrive.selfdrived.selfdrived import SelfdriveD
   from openpilot.starpilot.controllers.mode_actions import SwitchbackCooldown
 
-  vis, timer = _update_subaru_line_visibility(None, 0.0, 0.55, 0.01)
-  assert vis and timer == 0.0
-  vis, timer = _update_subaru_line_visibility(vis, timer, 0.42, 0.01)
-  assert vis and timer == 0.0
-  for _ in range(24):
-    vis, timer = _update_subaru_line_visibility(vis, timer, 0.35, 0.01)
-    assert vis
-  vis, timer = _update_subaru_line_visibility(vis, timer, 0.35, 0.01)
-  assert not vis
-  for _ in range(99):
-    vis, timer = _update_subaru_line_visibility(vis, timer, 0.56, 0.01)
-    assert not vis
-  vis, timer = _update_subaru_line_visibility(vis, timer, 0.56, 0.01)
-  assert vis
-
   now = time.monotonic_ns()
   names = ('deviceState', 'carControl', 'longitudinalPlan', 'starpilotLongitudinalPlan', 'modelV2', 'slcState')
   data = {name: getattr(messaging.new_message(name), name) for name in names}
-  data['carControl'].hudControl.lanesVisible = True
+  data['carControl'].hudControl.lanesVisible = False
+  data['carControl'].hudControl.visualAlert = structs.CarControl.HUDControl.VisualAlert.steerRequired
+  data['carControl'].hudControl.audibleAlert = structs.CarControl.HUDControl.AudibleAlert.warningSoft
 
   class _Sm:
     def __init__(self):
@@ -250,7 +237,7 @@ def test_legacy_2025_line_visibility_and_passive_dashcam_chimes():
   drive.is_metric = False
   drive.events = Events()
   drive.AM = AlertManager()
-  drive.params = Params()
+  drive.params = Mock(spec=Params, get=lambda _k: None)
   drive.switchback_capable = False
   drive.switchback_setting_ns = now
   drive.switchback_cooldown_ns = 0
@@ -270,6 +257,19 @@ def test_legacy_2025_line_visibility_and_passive_dashcam_chimes():
   assert drive.AM.current_alert.alert_type == ""
 
   drive.CP.passive = False
+  drive.sm.frame += 1
+  drive.update_alerts(cs)
+  assert drive.AM.current_alert.alert_type == "lkaHandsOnWheel/warning"
+  assert drive.AM.current_alert.audible_alert == log.SelfdriveState.AudibleAlert.warningSoft
+
+  data['carControl'].hudControl.audibleAlert = structs.CarControl.HUDControl.AudibleAlert.none
+  drive.sm.frame += 1
+  drive.update_alerts(cs)
+  assert drive.AM.current_alert.alert_type == "lkaHandsOnWheel/warning"
+  assert drive.AM.current_alert.audible_alert == log.SelfdriveState.AudibleAlert.none
+
+  data['carControl'].hudControl.lanesVisible = True
+  data['carControl'].hudControl.visualAlert = structs.CarControl.HUDControl.VisualAlert.none
   drive.sm.frame += 1
   drive.update_alerts(cs)
   assert drive.legacy_2025_green_wheel_active

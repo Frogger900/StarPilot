@@ -1,7 +1,7 @@
 """Subaru physical cruise intent with independent lateral authority."""
 from opendbc.car import structs
 from opendbc.car.subaru.stock_aol import IMPREZA_MAIN_AOL, qualified, temporary_restriction
-from opendbc.car.subaru.values import CAR, EARLY_GLOBAL_TORQUE_CARS, FROGGER_ANGLE_SIBLINGS, SubaruSafetyFlags
+from opendbc.car.subaru.values import CAR, EARLY_GLOBAL_TORQUE_CARS, FROGGER_ANGLE_SIBLINGS, SUBARU_LKA_CARS, SubaruSafetyFlags
 from openpilot.starpilot.aol.intent import AolCardIntent
 from openpilot.starpilot.aol.policy import AolVehiclePolicy
 
@@ -25,10 +25,11 @@ def _drive_gear(cp, state):
 class SubaruStockCardIntent(AolCardIntent):
   observe_stock_engagement = True
 
-  def __init__(self, settings, *, main_arm=False, allow_manumatic=False):
+  def __init__(self, settings, *, main_arm=False, allow_manumatic=False, allow_lka=False):
     super().__init__(settings, explicit_latch=True, lkas_button_supported=False)
     self.main_arm = main_arm
     self.allow_manumatic = allow_manumatic
+    self.allow_lka = bool(allow_lka)
     self._previous_main = None
     self._main_observed_ns = 0
     self._main_event_ns = 0
@@ -37,6 +38,9 @@ class SubaruStockCardIntent(AolCardIntent):
     self._pending_main_restriction_ns = 0
     self._deferred_park_main = False
     self.main_arm_ns = 0
+
+  def _lateral_enabled(self) -> bool:
+    return bool(self.settings.enabled or (self.allow_lka and getattr(self.settings, 'lka_enabled', False)))
 
   def output(self, CS):
     allowed, pause_lateral, pause_longitudinal = super().output(CS)
@@ -58,7 +62,7 @@ class SubaruStockCardIntent(AolCardIntent):
       if self.allow_manumatic else
       (structs.CarState.GearShifter.drive,)
     )
-    base_safe = (self.settings.enabled and CS.canValid and not CS.canTimeout and
+    base_safe = (self._lateral_enabled() and CS.canValid and not CS.canTimeout and
                  not self._calibration_inhibit and not self._calibration_rearm_required and
                  not CS.steerFaultPermanent and not CS.accFaulted and
                  not any(e.type == structs.CarState.ButtonEvent.Type.cancel and e.pressed for e in CS.buttonEvents))
@@ -139,7 +143,8 @@ def create_intent(cp, settings):
   main_arm = (cp.carFingerprint in (CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025) or
               (cp.carFingerprint in EARLY_GLOBAL_TORQUE_CARS | {CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_LEGACY_2025, CAR.SUBARU_OUTBACK_2023} and qualified(cp)))
   return SubaruStockCardIntent(settings, main_arm=main_arm,
-                               allow_manumatic=(cp.carFingerprint == CAR.SUBARU_LEGACY_2025))
+                               allow_manumatic=(cp.carFingerprint == CAR.SUBARU_LEGACY_2025),
+                               allow_lka=(cp.carFingerprint in SUBARU_LKA_CARS))
 
 
 def sng_standstill_lateral_inhibit(cp, state, *, initial_wait: bool = False):
@@ -241,14 +246,41 @@ def retain_stopped_intent(feedback, sm, cp, state, axis, now_ns, *, latched, pro
 
 
 def sync_legacy_card_lateral(card, cs, cc) -> None:
-  if (card.CP.carFingerprint == CAR.SUBARU_LEGACY_2025 and cs.cruiseState.available and
-      getattr(card.CI.CS, "_lkas_mode_settle_frames", 0) == 0):
-    card.CI.CS.lateral_off = not bool(cc.hudControl.lanesVisible)
+  if (card.CP.carFingerprint in SUBARU_LKA_CARS and cs.cruiseState.available and
+      getattr(card.CI.CS, "_lkas_mode_settle_frames", 0) == 0 and
+      bool(getattr(card.CI.CS, "aol_enabled", True))):
+    centering_active = bool(cc.hudControl.lanesVisible)
+    if (not card.CI.CS.lka_armed and not card.CI.CS.lateral_off) != centering_active:
+      if centering_active:
+        card.CI.CS.lka_armed = False
+        card.CI.CS.lateral_off = False
+      elif bool(getattr(card.CI.CS, "lka_enabled", False)):
+        card.CI.CS.lka_armed = True
+        card.CI.CS.lateral_off = False
+      else:
+        card.CI.CS.lka_armed = False
+        card.CI.CS.lateral_off = True
+      if bool(getattr(card.CI.CS, "lka_enabled", False)):
+        card.CI.CS.last_lateral_mode_centering = not card.CI.CS.lka_armed
 
 
 def sync_legacy_card_aol(card) -> None:
   cs = getattr(getattr(card, "CI", None), "CS", None)
-  if cs is not None and getattr(getattr(cs, "CP", None), "carFingerprint", None) in FROGGER_ANGLE_SIBLINGS | {CAR.SUBARU_LEGACY_2025}:
+  fp = getattr(getattr(cs, "CP", None), "carFingerprint", None)
+  if cs is not None and fp in FROGGER_ANGLE_SIBLINGS | {CAR.SUBARU_LEGACY_2025} | SUBARU_LKA_CARS:
     intent = getattr(card, "aol_card_intent", None)
     settings = getattr(intent, "settings", None)
-    cs.aol_enabled = bool(settings.enabled) if settings is not None else bool(card.params.get_bool("AlwaysOnLateral"))
+    if settings is not None:
+      cs.aol_enabled = bool(settings.enabled)
+    else:
+      cs.aol_enabled = bool(card.params.get_bool("AlwaysOnLateral"))
+    if fp in SUBARU_LKA_CARS:
+      if not getattr(cs, "_last_lateral_mode_seeded", False):
+        cs.last_lateral_mode_centering = bool(card.params.get("LastLateralModeCentering", return_default=True))
+        cs._last_lateral_mode_seeded = True
+        if not getattr(cs, "_lka_button_seen", False):
+          cs._prev_lka_mode_settings = None
+      if settings is not None:
+        cs.lka_enabled = bool(settings.lka_enabled)
+      else:
+        cs.lka_enabled = bool(card.params.get("LaneKeepAssist", return_default=True))
