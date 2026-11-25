@@ -1,4 +1,6 @@
 """Subaru physical cruise intent with independent lateral authority."""
+from math import isfinite
+
 from opendbc.car import structs
 from opendbc.car.subaru.stock_aol import IMPREZA_MAIN_AOL, qualified, temporary_restriction
 from opendbc.car.subaru.values import CAR, EARLY_GLOBAL_TORQUE_CARS, FROGGER_ANGLE_SIBLINGS, SUBARU_LKA_CARS, SubaruSafetyFlags
@@ -213,7 +215,8 @@ def retain_stopped_intent(feedback, sm, cp, state, axis, now_ns, *, latched, pro
 
   previous = feedback.signature
   if (cp.carFingerprint not in (CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_LEGACY_2025) or not qualified(cp, marked_only=True) or
-      not latched or not feedback.ever_lateral_active or feedback.failed or feedback.paused or
+      not latched or not (feedback.ever_lateral_active or cp.carFingerprint == CAR.SUBARU_LEGACY_2025) or
+      feedback.failed or feedback.paused or
       feedback.pending_event or feedback.retention_started_ns or feedback.source_retention_started_ns or
       not feedback.session or cp_identity(cp) != feedback.cp or previous is None or signature != previous or
       previous[0] != feedback.session or previous[7] != feedback.session or previous[5] != 'none' or
@@ -223,7 +226,9 @@ def retain_stopped_intent(feedback, sm, cp, state, axis, now_ns, *, latched, pro
       not 0 < previous[8] <= previous[2] <= now_ns or not 0 < feedback.healthy_feedback_ns <= now_ns or
       previous[2] - previous[8] > AXIS_MAX_AGE_NS or previous[4] != previous[2] + AXIS_MAX_AGE_NS or
       not previous[4] < now_ns or now_ns - previous[8] > SAFETY_MAX_AGE_NS or
-      not state.canValid or state.canTimeout or not state.standstill or not state.brakePressed or
+      not state.canValid or state.canTimeout or not state.standstill or
+      (not state.brakePressed and not (cp.carFingerprint == CAR.SUBARU_LEGACY_2025 and
+        state.vEgoRaw == 0. and isfinite(state.vEgo) and isfinite(state.vEgoRaw))) or
       not _drive_gear(cp, state) or not state.cruiseState.available or
       state.cruiseState.enabled or state.gasPressed or state.regenBraking or state.buttonEvents or
       state.steerFaultTemporary or state.steerFaultPermanent or state.accFaulted or state.doorOpen or

@@ -21,14 +21,20 @@ class StoppedIntentProof:
 
 
 def stopped_state(cp, state):
-  return bool(cp.carFingerprint == CAR.SUBARU_IMPREZA_2020 and qualified(cp, marked_only=True) and
+  from openpilot.starpilot.car.subaru.aol import _drive_gear
+  return bool(cp.carFingerprint in (CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_LEGACY_2025) and
+    qualified(cp, marked_only=True) and
     state.canValid and not state.canTimeout and state.standstill and state.vEgoRaw == 0. and
     isfinite(state.vEgo) and isfinite(state.vEgoRaw) and
-    state.gearShifter == structs.CarState.GearShifter.drive and state.cruiseState.available and
+    _drive_gear(cp, state) and state.cruiseState.available and
     not state.cruiseState.enabled and not state.gasPressed and not state.regenBraking and
     not state.buttonEvents and not state.steerFaultTemporary and not state.steerFaultPermanent and
     not state.accFaulted and not state.doorOpen and not state.seatbeltUnlatched and
     not state.vehicleSensorsInvalid and not state.steeringDisengage)
+
+
+def _stopped_history_ok(cp, ever_active: bool) -> bool:
+  return bool(ever_active or cp.carFingerprint == CAR.SUBARU_LEGACY_2025)
 
 
 def native_off(native):
@@ -42,7 +48,8 @@ def record_stopped_intent(sd, state, message, now_ns):
   axis = message.aolAxisState
   intent = getattr(sd, 'aol_last_intent', None)
   companion = getattr(sd, 'aol_intent_companion', None)
-  if (not stopped_state(sd.CP, state) or not getattr(sd, 'aol_ever_active', False) or sd.aol_authority_lost or sd.enabled or sd.active or
+  if (not stopped_state(sd.CP, state) or not _stopped_history_ok(sd.CP, getattr(sd, 'aol_ever_active', False)) or
+      sd.aol_authority_lost or sd.enabled or sd.active or
       not message.valid or not axis.qualified or str(axis.faultReason) != 'none' or str(axis.mode) != 'off' or
       str(axis.sessionId) != sd.aol_session_id or str(axis.faultSessionId) != sd.aol_session_id or
       axis.observedMonoTime != now_ns or axis.validUntilMonoTime != now_ns + AXIS_MAX_AGE_NS or
@@ -67,7 +74,8 @@ def retain_stopped_source(sd, state, intent, source_ns, now_ns):
   companion = getattr(sd, 'aol_intent_companion', None)
   decision = sd.aol_axis_decision
   if (proof is None or not stopped_state(sd.CP, state) or state is not proof.state or intent != proof.intent or
-      sd.aol_session_id != proof.session or cp_identity(sd.CP) != proof.cp or not getattr(sd, 'aol_ever_active', False) or
+      sd.aol_session_id != proof.session or cp_identity(sd.CP) != proof.cp or
+      not _stopped_history_ok(sd.CP, getattr(sd, 'aol_ever_active', False)) or
       sd.aol_authority_lost or sd.enabled or sd.active or
       getattr(sd, 'aol_fault_reason', 'none') not in ('none', 'availabilityPause') or
       any((decision.desired_lateral, decision.desired_longitudinal, decision.lateral_active, decision.longitudinal_active)) or
@@ -106,7 +114,8 @@ def retain_stopped_source_feedback(feedback, sm, cp, state, axis, stamp, now_ns,
   from openpilot.starpilot.aol.transport_pause import _healthy_transport_native, cp_identity, host_source_availability_only
   previous = feedback.signature
   if (not stopped_state(cp, state) or not latched or feedback.failed or feedback.paused or feedback.pending_event or
-      feedback.retention_started_ns or feedback.source_retention_started_ns or not feedback.ever_lateral_active or
+      feedback.retention_started_ns or feedback.source_retention_started_ns or
+      not _stopped_history_ok(cp, feedback.ever_lateral_active) or
       previous is None or not feedback.session or cp_identity(cp) != feedback.cp or
       previous[0] != feedback.session or previous[7] != feedback.session or previous[5] != 'none' or
       any(previous[9:13]) or not previous[13] or not producer or previous[14] != producer or

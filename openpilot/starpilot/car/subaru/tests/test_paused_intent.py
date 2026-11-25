@@ -14,8 +14,10 @@ from openpilot.starpilot.car.subaru.paused_intent import (
 )
 
 
-def source_case():
-  cp, state, feedback, sm, native, stamp = stopped_feedback()
+def source_case(*, candidate=None, ever_active=True, gear='drive', brake=True):
+  from opendbc.car.subaru.values import CAR
+  cp, state, feedback, sm, native, stamp = stopped_feedback(
+    candidate=candidate or CAR.SUBARU_IMPREZA_2020, ever_active=ever_active, gear=gear, brake=brake)
   for name in ('modelV2', 'extrinsicsCalibration', 'driverMonitoringState'):
     event = messaging.new_message(name, valid=True, logMonoTime=stamp)
     if name == 'extrinsicsCalibration':
@@ -27,7 +29,7 @@ def source_case():
   intent = IntentState(PRODUCER, 2, stamp, stamp, stamp + 200_000_000, True, False, False, True, True)
   companion = SimpleNamespace(session=PRODUCER, integrity_epoch=0, last_drain_ok=True,
     latest=(stamp, True, intent), raw_projections={stamp: (intent, 0, PRODUCER)})
-  sd = SimpleNamespace(CP=cp, sm=sm, aol_session_id=SESSION, aol_ever_active=True,
+  sd = SimpleNamespace(CP=cp, sm=sm, aol_session_id=SESSION, aol_ever_active=ever_active,
     aol_authority_lost=False, enabled=False, active=False, aol_fault_reason='none', aol_last_intent=intent,
     aol_intent_companion=companion, aol_axis_decision=AxisDecision(native_acknowledged=True),
     events=SimpleNamespace(to_msg=lambda: sm['onroadEvents'], contains=lambda _kind: False))
@@ -394,3 +396,178 @@ def test_stopped_source_proof_depends_on_zero_wheel_speed_not_brake(brake_presse
     assert sd.aol_stopped_intent_proof is proof
     assert (leases(feedback), feedback.signature, intent.validUntilMonoTime, sd.aol_axis_decision) == before
   assert not retain_stopped_source(sd, state, intent, stamp, stamp + 200_000_001)
+
+
+@pytest.mark.parametrize('gear', ('drive', 'manumatic'))
+@pytest.mark.parametrize('ever_active', (False, True))
+@pytest.mark.parametrize('brake_pressed', (False, True))
+def test_legacy_2025_stopped_source_and_feedback_retention(gear, ever_active, brake_pressed):
+  from opendbc.car.subaru.values import CAR
+  sd, state, intent, stamp, feedback, _ = source_case(
+    candidate=CAR.SUBARU_LEGACY_2025, ever_active=ever_active, gear=gear, brake=brake_pressed)
+  proof = sd.aol_stopped_intent_proof
+  before_source = leases(feedback), feedback.signature, intent.validUntilMonoTime, sd.aol_axis_decision
+  for age in (30_000_001, 35_000_000, 100_000_000, 190_000_000):
+    assert retain_stopped_source(sd, state, intent, stamp, stamp + age)
+    assert sd.aol_stopped_intent_proof is proof
+    assert (leases(feedback), feedback.signature, intent.validUntilMonoTime, sd.aol_axis_decision) == before_source
+  assert not retain_stopped_source(sd, state, intent, stamp, stamp + 30_000_000)
+  assert not retain_stopped_source(sd, state, intent, stamp, stamp + 200_000_001)
+
+  before_fb = leases(feedback), feedback.signature, feedback.sequence
+  now = stamp + 35_000_000
+  sm, native = sample(sd.CP, now, now, 3 if ever_active else 2, active=False, requested=False, allowed=False, event_stamp=now)
+  change(sm, 'aolAxisState', lambda a: (setattr(a, 'sourceCarStateMonoTime', 0),
+    setattr(a, 'nativeAcknowledged', False), setattr(a, 'faultReason', 'availabilityPause'), setattr(a, 'intentIntegrityEpoch', 0)))
+  change(sm, 'onroadEvents', lambda e: (setattr(e[0], 'name', 'commIssue'), setattr(e[0], 'userDisable', False), setattr(e[0], 'softDisable', True)))
+  assert retain_stopped_source_feedback(feedback, sm, sd.CP, state, sm['aolAxisState'], now, now,
+    latched=True, producer=PRODUCER)
+  assert not feedback.observe(sm, sd.CP, state, now, latched=True, intent_producer_session=PRODUCER)
+  assert (leases(feedback), feedback.signature, feedback.sequence) == before_fb
+  assert not retain_stopped_source_feedback(feedback, sm, sd.CP, state, sm['aolAxisState'], now, stamp + 200_000_001,
+    latched=True, producer=PRODUCER)
+  assert not native.requestedLateral and not native.lateralAllowed
+  state.standstill = state.brakePressed = False
+  state.vEgo = state.vEgoRaw = 15.
+  recover_ns = stamp + 195_000_000
+  recovered, rec_native = sample(sd.CP, recover_ns, recover_ns, 4 if ever_active else 3, event_stamp=recover_ns)
+  change(recovered, 'aolAxisState', lambda a: setattr(a, 'intentIntegrityEpoch', 0))
+  assert not feedback.observe(recovered, sd.CP, state, recover_ns, latched=True, intent_producer_session=PRODUCER)
+  assert not feedback.failed and rec_native.lateralAllowed
+
+
+@pytest.mark.parametrize('fault', ('moving', 'wheel_speed', 'reverse', 'park', 'main_off', 'acc_on', 'gas',
+  'can_invalid', 'timeout', 'eps', 'permanent', 'door', 'belt', 'cancel', 'native_request', 'native_allow',
+  'native_fault', 'hard_event', 'user_off'))
+def test_legacy_2025_cold_stopped_vetoes(fault):
+  from opendbc.car.subaru.values import CAR
+  sd, state, intent, stamp, feedback, native = source_case(
+    candidate=CAR.SUBARU_LEGACY_2025, ever_active=False, gear='manumatic', brake=False)
+  now = stamp + 35_000_000
+  fb_sm, fb_native = sample(sd.CP, now, now, 2, active=False, requested=False, allowed=False, event_stamp=now)
+  change(fb_sm, 'aolAxisState', lambda a: (setattr(a, 'sourceCarStateMonoTime', 0),
+    setattr(a, 'nativeAcknowledged', False), setattr(a, 'faultReason', 'availabilityPause'), setattr(a, 'intentIntegrityEpoch', 0)))
+  change(fb_sm, 'onroadEvents', lambda e: (setattr(e[0], 'name', 'commIssue'), setattr(e[0], 'userDisable', False), setattr(e[0], 'softDisable', True)))
+  physical = {'moving': ('standstill', False), 'wheel_speed': ('vEgoRaw', 0.1), 'gas': ('gasPressed', True),
+    'can_invalid': ('canValid', False), 'timeout': ('canTimeout', True), 'eps': ('steerFaultTemporary', True),
+    'permanent': ('steerFaultPermanent', True), 'door': ('doorOpen', True), 'belt': ('seatbeltUnlatched', True)}
+  if fault in physical:
+    setattr(state, *physical[fault])
+  elif fault in ('reverse', 'park'):
+    state.gearShifter = fault
+  elif fault == 'main_off':
+    state.cruiseState.available = False
+  elif fault == 'acc_on':
+    state.cruiseState.enabled = True
+  elif fault == 'cancel':
+    state.buttonEvents = [{'type': 'cancel', 'pressed': True}]
+  elif fault in ('native_request', 'native_allow'):
+    field = 'requestedLateral' if fault == 'native_request' else 'lateralAllowed'
+    native_change(sd.sm, native, **{field: True})
+    native_change(fb_sm, fb_native, **{field: True})
+  elif fault == 'native_fault':
+    native_change(sd.sm, native, pandaInventory=(replace(native.pandaInventory[0], faults=1),))
+    native_change(fb_sm, fb_native, pandaInventory=(replace(fb_native.pandaInventory[0], faults=1),))
+  elif fault in ('hard_event', 'user_off'):
+    for msg_sm in (sd.sm, fb_sm):
+      change(msg_sm, 'onroadEvents', lambda e: (
+        setattr(e[0], 'immediateDisable' if fault == 'hard_event' else 'userDisable', True),
+        setattr(e[0], 'softDisable', False),
+        setattr(e[0], 'name', 'controlsMismatch' if fault == 'hard_event' else 'buttonCancel')))
+  else:
+    raise AssertionError(fault)
+  assert not retain_stopped_source(sd, state, intent, stamp, now)
+  assert not retain_stopped_source_feedback(feedback, fb_sm, sd.CP, state, fb_sm['aolAxisState'], now, now,
+    latched=True, producer=PRODUCER)
+
+
+def test_stopped_state_and_cold_history_scope():
+  from opendbc.car import gen_empty_fingerprint, structs
+  from opendbc.car.subaru.interface import CarInterface
+  from opendbc.car.subaru.values import CAR
+  from openpilot.common.prefix import OpenpilotPrefix
+  from openpilot.starpilot.aol.vehicle import policy_for
+  from openpilot.starpilot.car.subaru.aol import retain_stopped_intent
+  from openpilot.starpilot.car.subaru.paused_intent import stopped_state
+
+  sd, state, intent, stamp, feedback, _ = source_case()
+  state.gearShifter = 'manumatic'
+  assert not stopped_state(sd.CP, state)
+
+  sd_cold, cold_state, cold_intent, cold_stamp, cold_fb, _ = source_case()
+  sd_cold.aol_ever_active = False
+  cold_fb.ever_lateral_active = False
+  sd_cold.aol_stopped_intent_proof = None
+  record_stopped_intent(sd_cold, cold_state, sd_cold.sm.messages['aolAxisState'], cold_stamp)
+  assert sd_cold.aol_stopped_intent_proof is None
+  sd_cold.aol_stopped_intent_proof = sd.aol_stopped_intent_proof
+  assert not retain_stopped_source(sd_cold, cold_state, cold_intent, cold_stamp, cold_stamp + 35_000_000)
+  now = cold_stamp + 35_000_000
+  sm, _ = sample(sd_cold.CP, now, now, 3, active=False, requested=False, allowed=False, event_stamp=now)
+  change(sm, 'aolAxisState', lambda a: (setattr(a, 'sourceCarStateMonoTime', 0),
+    setattr(a, 'nativeAcknowledged', False), setattr(a, 'faultReason', 'availabilityPause'), setattr(a, 'intentIntegrityEpoch', 0)))
+  change(sm, 'onroadEvents', lambda e: (setattr(e[0], 'name', 'commIssue'), setattr(e[0], 'userDisable', False), setattr(e[0], 'softDisable', True)))
+  assert not retain_stopped_source_feedback(cold_fb, sm, sd_cold.CP, cold_state, sm['aolAxisState'], now, now,
+    latched=True, producer=PRODUCER)
+  assert not retain_stopped_intent(cold_fb, sm, sd_cold.CP, cold_state, sm['aolAxisState'], now,
+    latched=True, producer=PRODUCER, signature=cold_fb.signature)
+
+  with OpenpilotPrefix():
+    for candidate in (CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_CROSSTREK_2025):
+      other_cp = CarInterface.get_params(candidate, gen_empty_fingerprint(), [], False, False, False)
+      other_cp.alternativeExperience |= policy_for(other_cp).alternative_experience_addition
+      other_state = structs.CarState(canValid=True, gearShifter='drive', vEgo=0., vEgoRaw=0., standstill=True, brakePressed=True)
+      other_state.cruiseState.available = True
+      assert not stopped_state(other_cp, other_state)
+
+
+@pytest.mark.parametrize('gear', ('drive', 'manumatic'))
+def test_legacy_2025_selfdrived_expire_axis_source_cold_standstill(gear):
+  from unittest.mock import patch
+  from opendbc.car.subaru.values import CAR
+  from openpilot.cereal import log
+  from openpilot.selfdrive.selfdrived.events import ET, EventName, Events
+  from openpilot.selfdrive.selfdrived.selfdrived import SelfdriveD
+  from openpilot.selfdrive.selfdrived.state import StateMachine
+
+  sd_stub, state, intent, stamp, _, _ = source_case(
+    candidate=CAR.SUBARU_LEGACY_2025, ever_active=False, gear=gear, brake=False)
+  sd = SelfdriveD.__new__(SelfdriveD)
+  sd.CP = sd_stub.CP
+  sd.sm = sd_stub.sm
+  sd.events = Events()
+  sd.events.add(EventName.pcmDisable)
+  sd.state_machine = StateMachine()
+  sd.state_machine.state = log.SelfdriveState.OpenpilotState.disabled
+  sd.initialized = True
+  sd.enabled = sd.active = False
+  sd.aol_replay = True
+  sd.axis_transport_required = True
+  sd.aol_session_id = SESSION
+  sd.aol_ever_active = False
+  sd.aol_authority_lost = False
+  sd.aol_fault_reason = 'none'
+  sd.aol_last_intent = intent
+  sd.aol_publication_retained_intent = None
+  sd.aol_intent_companion = sd_stub.aol_intent_companion
+  sd.aol_axis_decision = AxisDecision(native_acknowledged=True)
+  sd.aol_car_state_log_ns = stamp
+  sd.conditional_car_state_valid = True
+  sd.aol_selected_pair_future = False
+  sd.aol_step_input_proof = None
+  sd.aol_published_input_proof = None
+  sd.aol_availability_pause = None
+  sd.aol_transport_pause = None
+  sd.aol_ordinary_source_anchor = None
+  sd.aol_stopped_intent_proof = sd_stub.aol_stopped_intent_proof
+
+  with patch('openpilot.selfdrive.selfdrived.selfdrived.REPLAY', False):
+    sd._expire_axis_source(state, stamp + 35_000_000)
+
+  assert sd.aol_fault_reason == 'availabilityPause'
+  assert sd.aol_publication_retained_intent is intent
+  assert EventName.commIssue in sd.events.names
+  assert EventName.controlsMismatch not in sd.events.names
+  assert ET.IMMEDIATE_DISABLE not in sd.state_machine.current_alert_types
+  assert not sd.aol_authority_lost
+  assert sd.aol_axis_decision == AxisDecision()

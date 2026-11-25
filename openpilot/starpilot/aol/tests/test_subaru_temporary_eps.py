@@ -356,15 +356,27 @@ def test_pending_braked_main_epoch_and_release_timeout_are_not_renewed():
 
 
 
-def stopped_feedback(epoch=0):
-  cp, state, feedback = baseline()
-  state.standstill = state.brakePressed = True
-  state.vEgo = state.vEgoRaw = 0.
+def stopped_feedback(epoch=0, *, candidate=CAR.SUBARU_IMPREZA_2020, ever_active=True, gear='drive', brake=True):
   stamp = NOW + 10_000_000
-  sm, native = sample(cp, stamp, stamp, 2, active=False, requested=False, allowed=False, event_stamp=stamp)
+  if ever_active:
+    cp, state, feedback = baseline(candidate)
+    state.standstill, state.brakePressed, state.gearShifter = True, brake, gear
+    state.vEgo = state.vEgoRaw = 0.
+    sm, native = sample(cp, stamp, stamp, 2, active=False, requested=False, allowed=False, event_stamp=stamp)
+  else:
+    with OpenpilotPrefix():
+      cp = CarInterface.get_params(candidate, gen_empty_fingerprint(), [], False, False, False)
+    policy = policy_for(cp)
+    cp.alternativeExperience |= policy.alternative_experience_addition
+    cp.safetyConfigs[0].safetyParam |= policy.safety_param_addition
+    assert qualified(cp, marked_only=True)
+    state = structs.CarState(canValid=True, gearShifter=gear, vEgo=0., vEgoRaw=0., standstill=True, brakePressed=brake)
+    state.cruiseState.available = True
+    feedback = TransportPauseFeedback(cp)
+    sm, native = sample(cp, stamp, stamp, 1, active=False, requested=False, allowed=False, event_stamp=stamp)
   change(sm, 'aolAxisState', lambda axis: setattr(axis, 'intentIntegrityEpoch', epoch))
   assert not feedback.observe(sm, cp, state, stamp, latched=True, intent_producer_session=PRODUCER)
-  assert not any(feedback.signature[9:13]) and feedback.ever_lateral_active
+  assert not any(feedback.signature[9:13]) and feedback.ever_lateral_active == ever_active
   return cp, state, feedback, sm, native, stamp
 
 
@@ -499,3 +511,42 @@ def test_braked_main_cannot_reinterpret_granted_gesture_as_first_grant(arm_offse
   assert not retain_braked_main_intent(feedback, sm, cp, state, sm['aolAxisState'], now,
                                       arm_ns=NOW + arm_offset, producer=PRODUCER)
   assert feedback.subaru_braked_main is None and leases(feedback) == before
+
+
+@pytest.mark.parametrize('gear', ('drive', 'manumatic'))
+@pytest.mark.parametrize('ever_active', (False, True))
+@pytest.mark.parametrize('brake', (False, True))
+def test_legacy_2025_standstill_feedback_gap_retains_and_recovers(gear, ever_active, brake):
+  from openpilot.starpilot.aol.runtime import current_axis
+
+  cp, state, feedback, sm, _, stamp = stopped_feedback(
+    candidate=CAR.SUBARU_LEGACY_2025, ever_active=ever_active, gear=gear, brake=brake)
+  before = leases(feedback), feedback.signature, feedback.sequence
+  for age in (33_917_864, 50_000_000, 100_000_000, 190_000_000):
+    assert current_axis(sm, now_ns=stamp + age) is None
+    assert not feedback.observe(sm, cp, state, stamp + age, latched=True, intent_producer_session=PRODUCER)
+    assert not feedback.failed
+    assert (leases(feedback), feedback.signature, feedback.sequence) == before
+  state.standstill = state.brakePressed = False
+  state.vEgo = state.vEgoRaw = 15.
+  now = stamp + 195_000_000
+  fresh, native = sample(cp, now, now, 3 if ever_active else 2, event_stamp=now)
+  assert not feedback.observe(fresh, cp, state, now, latched=True, intent_producer_session=PRODUCER)
+  assert current_axis(fresh, now_ns=now).lateralActive and native.lateralAllowed
+
+
+@pytest.mark.parametrize('veto', ('timeout_200ms', 'wheel_speed', 'moving', 'reverse', 'park', 'main_off'))
+def test_legacy_2025_cold_standstill_feedback_gap_preserves_vetoes(veto):
+  cp, state, feedback, sm, _, stamp = stopped_feedback(
+    candidate=CAR.SUBARU_LEGACY_2025, ever_active=False, gear='manumatic', brake=False)
+  now = stamp + (200_000_001 if veto == 'timeout_200ms' else 33_917_864)
+  if veto == 'wheel_speed':
+    state.vEgoRaw = 0.1
+  elif veto == 'moving':
+    state.standstill = False
+  elif veto in ('reverse', 'park'):
+    state.gearShifter = veto
+  elif veto == 'main_off':
+    state.cruiseState.available = False
+  assert feedback.observe(sm, cp, state, now, latched=True, intent_producer_session=PRODUCER)
+  assert feedback.failed
